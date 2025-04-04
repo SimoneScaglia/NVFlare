@@ -36,9 +36,17 @@ class EdgeEventType:
     EDGE_JOB_REQUEST_RECEIVED = "_edge_job_request_received"
 
 
+class EdgeTaskHeaderKey:
+    TASK_SEQ = "task_seq"
+    HAS_AGGR_DATA = "has_aggr_data"
+    AGGR_INTERVAL = "aggr_interval"
+
+
 class MsgKey:
     PAYLOAD = "payload"
     RESULT = "result"
+    MODE = "mode"
+    WEIGHTS = "weights"
     NUM_DEVICES = "num_devices"
     TASK_ID = "task_id"
     TASK_DONE = "task_done"

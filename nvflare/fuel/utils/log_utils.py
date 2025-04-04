@@ -45,7 +45,7 @@ concise_log_dict["handlers"]["consoleHandler"]["filters"] = ["FLFilter"]
 verbose_log_dict = copy.deepcopy(default_log_dict)
 verbose_log_dict["formatters"]["consoleFormatter"][
     "fmt"
-] = "%(asctime)s - %(identity)s - %(name)s - %(levelname)s - %(message)s"
+] = "%(asctime)s - %(identity)s - %(fullName)s - %(levelname)s - %(fl_ctx)s - %(message)s"
 verbose_log_dict["loggers"]["root"]["level"] = "DEBUG"
 
 logmode_config_dict = {
@@ -118,34 +118,41 @@ class BaseFormatter(logging.Formatter):
         super().__init__(fmt=fmt, datefmt=datefmt, style=style)
 
     def format(self, record):
-        if not hasattr(record, "fullName"):
-            record.fullName = record.name
-            record.name = record.name.split(".")[-1]
+        # make a copy of record for modification
+        self.record = copy.copy(record)
+        if not hasattr(self.record, "fullName"):
+            self.record.fullName = self.record.name
+            self.record.name = self.record.name.split(".")[-1]
 
-        if not hasattr(record, "fl_ctx"):
-            record.fl_ctx = ""
-            record.identity = ""
-            message = record.getMessage()
-            # attempting to parse fl ctx key value pairs "[key0=value0, key1=value1,... ]: " from message
+        if not hasattr(self.record, "fl_ctx"):
+            self.record.fl_ctx = ""
+            self.record.identity = ""
+
+        if not self.record.fl_ctx:
+            # attempt to parse fl ctx key value pairs "[key0=value0, key1=value1,... ]: " from message
+            message = self.record.getMessage()
             fl_ctx_match = re.search(r"\[(.*?)\]: ", message)
+
             if fl_ctx_match:
                 try:
                     fl_ctx_pairs = {
                         pair.split("=", 1)[0]: pair.split("=", 1)[1] for pair in fl_ctx_match.group(1).split(", ")
                     }
-                    record.fl_ctx = fl_ctx_match[0][:-2]
-                    record.identity = fl_ctx_pairs.get("identity", "")  # TODO add more values as attributes?
-                    record.msg = message.replace(fl_ctx_match[0], "")
+                    self.record.fl_ctx = fl_ctx_match[0][:-2]
+                    # TODO add more fl_ctx values as attributes?
+                    self.record.identity = fl_ctx_pairs.get("identity", "")
+                    self.record.msg = message.replace(fl_ctx_match[0], "")
                     self._style._fmt = self.fmt
                 except:
-                    # found brackets pattern, but was not fl_ctx format
-                    self.remove_empty_placeholders()
-            else:
-                self.remove_empty_placeholders()
+                    # found brackets pattern, but was not valid fl_ctx format
+                    pass
 
-        return super().format(record)
+            if not self.record.fl_ctx:
+                self.remove_empty_attributes()
 
-    def remove_empty_placeholders(self):
+        return super().format(self.record)
+
+    def remove_empty_attributes(self):
         for placeholder in [
             " %(fl_ctx)s -",
             " %(identity)s -",
@@ -180,14 +187,14 @@ class ColorFormatter(BaseFormatter):
         record_s = super().format(record)
 
         # Apply level_colors based on record levelname
-        log_color = self.level_colors.get(record.levelname, "reset")
+        log_color = self.level_colors.get(self.record.levelname, "reset")
 
         # Apply logger_colors to logger names if INFO or below.
         logger_specificity = 0
-        if record.levelno <= logging.INFO:
+        if self.record.levelno <= logging.INFO:
             for name, color in self.logger_colors.items():
-                if (name.count(".") >= logger_specificity or record.name == name) and (
-                    record.fullName.startswith(name) or record.name == name
+                if (name.count(".") >= logger_specificity or self.record.name == name) and (
+                    self.record.fullName.startswith(name) or self.record.name == name
                 ):
                     log_color = color
                     logger_specificity = name.count(".")
@@ -223,7 +230,7 @@ class JsonFormatter(BaseFormatter):
 
         return fmt_dict
 
-    def formatMessage(self, record) -> dict:
+    def formatMessageDict(self, record) -> dict:
         message_dict = {}
         for fmt_key, fmt_val in self.fmt_dict.items():
             message_dict[fmt_key] = record.__dict__.get(fmt_val, "")
@@ -232,26 +239,28 @@ class JsonFormatter(BaseFormatter):
     def format(self, record) -> str:
         super().format(record)
 
-        record.asctime = self.formatTime(record, self.datefmt)
-        formatted_message_dict = self.formatMessage(record)
+        self.record.asctime = self.formatTime(self.record, self.datefmt)
+        formatted_message_dict = self.formatMessageDict(self.record)
         message_dict = {k: v for k, v in formatted_message_dict.items()}
 
         return json.dumps(message_dict, default=str)
 
 
 class LoggerNameFilter(logging.Filter):
-    def __init__(self, logger_names=["nvflare"], exclude_logger_names=[]):
+    def __init__(self, logger_names=["nvflare"], exclude_logger_names=[], allow_all_error_logs=True):
         """Filter log records based on logger names.
-        Additionally allows all log records with levelno > logging.INFO through.
 
         Args:
             logger_names (List[str]): list of logger names to allow through filter
             exclude_logger_names (List[str]): list of logger names to disallow through filter (takes precedence over allowing from logger_names)
+            allow_all_error_logs (bool): allow all log records with levelno > logging.INFO through filter, even if they are not from a logger in logger_names.
+                Defaults to True.
 
         """
         super().__init__()
         self.logger_names = logger_names
         self.exclude_logger_names = exclude_logger_names
+        self.allow_all_error_logs = allow_all_error_logs
 
     def filter(self, record):
         name = getattr(record, "fullName", record.name)
@@ -259,7 +268,9 @@ class LoggerNameFilter(logging.Filter):
         is_logger_included = self.matches_name(name, self.logger_names)
         is_logger_excluded = self.matches_name(name, self.exclude_logger_names)
 
-        return (record.levelno > logging.INFO) or (not is_logger_excluded and is_logger_included)
+        return (self.allow_all_error_logs and record.levelno > logging.INFO) or (
+            is_logger_included and not is_logger_excluded
+        )
 
     def matches_name(self, name, logger_names) -> bool:
         return any(name.startswith(logger_name) or name.split(".")[-1] == logger_name for logger_name in logger_names)
