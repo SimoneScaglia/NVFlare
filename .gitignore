@@ -168,3 +168,6 @@ audit.log
 # python
 __pycache__
 .pyc
+
+# swarm sample
+examples/advanced/swarm_learning_tf/swarm_env

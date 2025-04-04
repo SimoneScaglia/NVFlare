@@ -1,5 +1,6 @@
 #!/bin/bash
 
-script_dir="$( dirname -- "$0"; )";
+num_clients=$1
 
-python3 "${script_dir}"/../cifar10/tf/utils/cifar10_data_utils.py
+script_dir="$( dirname -- "$0"; )";
+python3 "${script_dir}"/../mimic/utils/mimic_dataset.py "$num_clients"

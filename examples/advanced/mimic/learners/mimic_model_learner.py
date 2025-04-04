@@ -1,0 +1,296 @@
+import os
+from typing import Union
+import csv
+import pandas as pd
+import numpy as np
+import tensorflow as tf
+from nvflare.apis.fl_constant import FLMetaKey, ReturnCode
+from nvflare.app_common.abstract.fl_model import FLModel, ParamsType
+from nvflare.app_common.abstract.model_learner import ModelLearner
+from nvflare.app_common.utils.fl_model_utils import FLModelUtils
+from nvflare.app_opt.tf.fedprox_loss import TFFedProxLoss
+from mimic.networks.mimic_nets import CNN
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from nvflare.app_common.app_constant import AppConstants, ValidateType, ModelName
+
+def log_performance(process, epoch, train_acc, val_acc, filename="performance_log.csv"):
+    file_exists = os.path.exists(filename)
+    
+    with open(filename, mode="a", newline="") as file:
+        writer = csv.writer(file)
+        if not file_exists:
+            writer.writerow(["Process", "Epoch", "Training Accuracy", "Validation Accuracy"])
+        writer.writerow([process, epoch, train_acc, val_acc])
+
+class MimicModelLearner(ModelLearner):
+    def __init__(
+        self,
+        train_idx_root: str = "./dataset",
+        aggregation_epochs: int = 1,
+        lr: float = 1e-2,
+        fedproxloss_mu: float = 0.0,
+        central: bool = False,
+        analytic_sender_id: str = "analytic_sender",
+        batch_size: int = 64,
+        num_workers: int = 0,
+    ):
+        """Simple tabular data Trainer.
+
+        Args:
+            train_idx_root: directory with site training indices for tabular data.
+            aggregation_epochs: the number of training epochs for a round. Defaults to 1.
+            lr: local learning rate. Float number. Defaults to 1e-2.
+            fedproxloss_mu: weight for FedProx loss. Float number. Defaults to 0.0 (no FedProx).
+            central: Bool. Whether to simulate central training. Default False.
+            analytic_sender_id: id of `AnalyticsSender` if configured as a client component.
+                If configured, TensorBoard events will be fired. Defaults to "analytic_sender".
+            batch_size: batch size for training and validation.
+            num_workers: number of workers for data loaders.
+
+        Returns:
+            an FLModel with the updated local model differences after running `train()`, the metrics after `validate()`,
+            or the best local model depending on the specified task.
+        """
+        super().__init__()
+        self.train_idx_root = train_idx_root
+        self.aggregation_epochs = aggregation_epochs
+        self.lr = lr
+        self.fedproxloss_mu = fedproxloss_mu
+        self.best_acc = 0.0
+        self.central = central
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.analytic_sender_id = analytic_sender_id
+
+        # Epoch counter
+        self.epoch_of_start_time = 0
+        self.epoch_global = 0
+
+        self.local_model_file = None
+        self.best_local_model_file = None
+        self.device = None
+        self.model = None
+        self.optimizer = None
+        self.criterion = None
+        self.criterion_prox = None
+        self.train_dataset = None
+        self.valid_dataset = None
+        self.train_loader = None
+        self.valid_loader = None
+
+    def initialize(self):
+        """Initialization of model, optimizer, loss function, etc."""
+        self.info(f"Client {self.site_name} initialized at \n {self.app_root} \n with args: {self.args}")
+        
+        self.local_model_file = os.path.join(self.app_root, "local_model.weights.h5")
+        self.best_local_model_file = os.path.join(self.app_root, "best_local_model.weights.h5")
+
+        # # Select local TensorBoard writer or event-based writer for streaming
+        # self.writer = self.get_component(
+        #     self.analytic_sender_id
+        # )  # user configured config_fed_client.json for streaming
+        # if not self.writer:  # use local TensorBoard writer only
+        #     self.writer = SummaryWriter(self.app_root)
+        
+        self.model = CNN()
+        self.optimizer = tf.keras.optimizers.Adam(learning_rate=self.lr)
+        self.criterion = tf.keras.losses.BinaryCrossentropy()
+        
+        if self.fedproxloss_mu > 0:
+            self.info(f"using FedProx loss with mu {self.fedproxloss_mu}")
+            self.criterion_prox = TFFedProxLoss(mu=self.fedproxloss_mu)
+
+    def _create_datasets(self):
+        """Load the tabular datasets, split for training and validation."""
+        if self.train_dataset is None or self.train_loader is None:
+            site_idx_file_name = os.path.join(self.train_idx_root, self.site_name + ".npy")
+            
+            if os.path.exists(site_idx_file_name):
+                site_idx = np.load(site_idx_file_name)
+                site_idx = np.array(site_idx, dtype=np.int32)
+            else:
+                self.stop_task(f"No subset index found! File {site_idx_file_name} does not exist!")
+            
+            self.info(f"Client subset size: {len(site_idx)}")
+            
+            df = pd.read_csv(self.train_idx_root + '/data.csv', header=None)
+            
+            df.replace('', np.nan, inplace=True)
+            df.fillna('missing', inplace=True)
+            
+            # Converti tutte le colonne in stringhe per evitare problemi con tipi misti
+            df = df.astype(str)
+            
+            # Converti i dati categorici in numeri
+            label_encoders = {}
+            for col in df.columns:
+                if df[col].nunique() < 20:  # Considera una colonna categorica se ha meno di 20 valori unici
+                    le = LabelEncoder()
+                    df[col] = le.fit_transform(df[col])
+                    label_encoders[col] = le
+            
+            # Separa features e labels
+            X = df.iloc[:, :-1].values  # Features
+            y = df.iloc[:, -1].values  # Labels
+            
+            # Dividi i dati in training e validation
+            X_train, X_valid, y_train, y_valid = train_test_split(X[site_idx], y[site_idx], test_size=0.2, random_state=42)
+            
+            # Converti in array NumPy esplicitamente, se necessario
+            X_train = np.array(X_train, dtype=np.float32)
+            y_train = np.array(y_train, dtype=np.float32)
+            X_valid = np.array(X_valid, dtype=np.float32)
+            y_valid = np.array(y_valid, dtype=np.float32)
+            
+            self.train_dataset = (X_train, y_train)
+            self.valid_dataset = (X_valid, y_valid)
+
+            self.train_loader = tf.data.Dataset.from_tensor_slices((X_train, y_train)).batch(self.batch_size)
+            self.valid_loader = tf.data.Dataset.from_tensor_slices((X_valid, y_valid)).batch(self.batch_size)
+
+    def finalize(self):
+        """Finalize resources like threads or open files."""
+        pass
+
+    def local_train(self, train_loader, model_global, val_freq: int = 0):
+        """Training loop using TensorFlow."""
+        for epoch in range(self.aggregation_epochs):
+            self.model.trainable = True
+            self.epoch_global = self.epoch_of_start_time + epoch
+            self.info(f"Local epoch {self.site_name}: {epoch + 1}/{self.aggregation_epochs} (lr={self.lr})")
+            avg_loss = 0.0
+            
+            for _, (inputs, labels) in enumerate(train_loader):
+                with tf.GradientTape() as tape:
+                    outputs = self.model(inputs, training=True)
+                    loss = self.criterion(labels, outputs)
+                    
+                    # FedProx loss term
+                    if self.fedproxloss_mu > 0:
+                        fed_prox_loss = self.criterion_prox(self.model, model_global)
+                        loss += fed_prox_loss
+
+                gradients = tape.gradient(loss, self.model.trainable_variables)
+                self.optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
+                avg_loss += loss.numpy()
+
+            if val_freq > 0 and epoch % val_freq == 0:
+                acc = self.local_valid(self.valid_loader, tb_id="val_acc_local_model")
+                if acc > self.best_acc:
+                    self.best_acc = acc
+                    self.save_model(is_best=True)
+
+    def save_model(self, is_best=False):
+        """Save model weights in HDF5 format"""
+        file_path = self.best_local_model_file if is_best else self.local_model_file
+        self.model.save_weights(file_path)
+
+    def train(self, model: FLModel) -> Union[str, FLModel]:
+        self._create_datasets()
+
+        # Get round information
+        self.info(f"Current/Total Round: {self.current_round + 1}/{self.total_rounds}")
+        self.info(f"Client identity: {self.site_name}")
+
+        # Update local model weights with received weights
+        global_weights = model.params
+        if isinstance(global_weights, dict):
+            self.model.set_weights(list(global_weights.values()))
+        else:
+            self.model.set_weights(global_weights)
+
+        # Local train steps
+        self.local_train(self.train_loader, self.model, val_freq=1 if self.central else 0)
+
+        # Validate after local train
+        acc = self.local_valid(self.valid_loader, tb_id="val_acc_local_model")
+        self.info(f"val_acc_local_model: {acc:.4f}")
+
+        log_performance('train', self.epoch_global, acc, acc)
+
+        self.save_model(is_best=False)
+        if acc > self.best_acc:
+            self.best_acc = acc
+            self.save_model(is_best=True)
+
+        # Compute delta model
+        local_weights = self.model.get_weights()
+        model_diff = {}
+        for idx, (layer_name, global_weight) in enumerate(global_weights.items()):
+            model_weight = local_weights[idx]
+            model_diff[layer_name] = model_weight - global_weight
+
+        fl_model = FLModel(params_type=ParamsType.DIFF, params=model_diff)
+
+        FLModelUtils.set_meta_prop(fl_model, FLMetaKey.NUM_STEPS_CURRENT_ROUND, len(self.train_loader))
+        self.info("Local epochs finished. Returning FLModel")
+        return fl_model
+
+    def local_valid(self, valid_loader, tb_id=None):
+        """Validation using TensorFlow."""
+        self.model.trainable = False
+        correct, total = 0, 0
+        for inputs, labels in valid_loader:
+            outputs = self.model(inputs)
+            pred_label = tf.argmax(outputs, axis=1)
+            total += len(labels)
+            correct += np.sum(pred_label == tf.cast(labels, tf.int64))
+
+        metric = correct / total
+        return metric
+
+    def validate(self, model: FLModel) -> Union[str, FLModel]:
+        """Validation for global model using TensorFlow."""
+        self._create_datasets()
+
+        self.info(f"Client identity: {self.site_name}")
+
+        global_weights = model.params
+        if isinstance(global_weights, dict):
+            self.model.set_weights(list(global_weights.values()))
+        else:
+            self.model.set_weights(global_weights)
+
+        # get validation meta info
+        validate_type = FLModelUtils.get_meta_prop(
+            model, FLMetaKey.VALIDATE_TYPE, ValidateType.MODEL_VALIDATE
+        )  # TODO: enable model.get_meta_prop(...)
+        model_owner = self.get_shareable_header(AppConstants.MODEL_OWNER)
+
+        # perform valid
+        train_acc = self.local_valid(
+            self.train_loader,
+            tb_id="train_acc_global_model" if validate_type == ValidateType.BEFORE_TRAIN_VALIDATE else None,
+        )
+        self.info(f"training acc ({model_owner}): {train_acc:.4f}")
+
+        val_acc = self.local_valid(
+            self.valid_loader,
+            tb_id="val_acc_global_model" if validate_type == ValidateType.BEFORE_TRAIN_VALIDATE else None,
+        )
+        self.info(f"validation acc ({model_owner}): {val_acc:.4f}")
+        self.info("Evaluation finished. Returning result")
+
+        log_performance('validate', self.epoch_global, train_acc, val_acc)
+
+        if val_acc > self.best_acc:
+            self.best_acc = val_acc
+            self.save_model(is_best=True)
+
+        return FLModel(metrics={"train_accuracy": train_acc, "val_accuracy": val_acc})
+
+    def get_model(self, model_name: str) -> Union[str, FLModel]:
+        if model_name == ModelName.BEST_MODEL:
+            try:
+                self.model.load_weights(self.best_local_model_file)
+                # Get all weights in order (weights + biases for each layer)
+                weights = self.model.get_weights()
+                # Convert list of weights to dict using sequential keys
+                weights_dict = {str(i): weight for i, weight in enumerate(weights)}
+                return FLModel(params_type=ParamsType.FULL, params=weights_dict)
+            except Exception as e:
+                self.error(f"Unable to load best model: {e}")
+                return ReturnCode.EXECUTION_RESULT_ERROR
+        else:
+            raise ValueError(f"Unknown model_type: {model_name}")

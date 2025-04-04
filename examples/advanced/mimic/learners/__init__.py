@@ -12,4 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .cifar10_model_learner import CIFAR10ModelLearner
+from .mimic_model_learner import MimicModelLearner
