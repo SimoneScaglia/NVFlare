@@ -1,6 +1,5 @@
 import os
 from typing import Union
-import csv
 import pandas as pd
 import numpy as np
 import tensorflow as tf
@@ -12,16 +11,8 @@ from nvflare.app_opt.tf.fedprox_loss import TFFedProxLoss
 from mimic.networks.mimic_nets import CNN
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
-from nvflare.app_common.app_constant import AppConstants, ValidateType, ModelName
-
-def log_performance(process, epoch, train_acc, val_acc, filename="performance_log.csv"):
-    file_exists = os.path.exists(filename)
-    
-    with open(filename, mode="a", newline="") as file:
-        writer = csv.writer(file)
-        if not file_exists:
-            writer.writerow(["Process", "Epoch", "Training Accuracy", "Validation Accuracy"])
-        writer.writerow([process, epoch, train_acc, val_acc])
+from nvflare.app_common.app_constant import AppConstants, ModelName
+from tensorflow.keras.metrics import AUC
 
 class MimicModelLearner(ModelLearner):
     def __init__(
@@ -57,7 +48,7 @@ class MimicModelLearner(ModelLearner):
         self.aggregation_epochs = aggregation_epochs
         self.lr = lr
         self.fedproxloss_mu = fedproxloss_mu
-        self.best_acc = 0.0
+        self.best_auc = 0.0
         self.central = central
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -82,21 +73,14 @@ class MimicModelLearner(ModelLearner):
     def initialize(self):
         """Initialization of model, optimizer, loss function, etc."""
         self.info(f"Client {self.site_name} initialized at \n {self.app_root} \n with args: {self.args}")
-        
+
         self.local_model_file = os.path.join(self.app_root, "local_model.weights.h5")
         self.best_local_model_file = os.path.join(self.app_root, "best_local_model.weights.h5")
 
-        # # Select local TensorBoard writer or event-based writer for streaming
-        # self.writer = self.get_component(
-        #     self.analytic_sender_id
-        # )  # user configured config_fed_client.json for streaming
-        # if not self.writer:  # use local TensorBoard writer only
-        #     self.writer = SummaryWriter(self.app_root)
-        
         self.model = CNN()
         self.optimizer = tf.keras.optimizers.Adam(learning_rate=self.lr)
         self.criterion = tf.keras.losses.BinaryCrossentropy()
-        
+
         if self.fedproxloss_mu > 0:
             self.info(f"using FedProx loss with mu {self.fedproxloss_mu}")
             self.criterion_prox = TFFedProxLoss(mu=self.fedproxloss_mu)
@@ -105,23 +89,23 @@ class MimicModelLearner(ModelLearner):
         """Load the tabular datasets, split for training and validation."""
         if self.train_dataset is None or self.train_loader is None:
             site_idx_file_name = os.path.join(self.train_idx_root, self.site_name + ".npy")
-            
+
             if os.path.exists(site_idx_file_name):
                 site_idx = np.load(site_idx_file_name)
                 site_idx = np.array(site_idx, dtype=np.int32)
             else:
                 self.stop_task(f"No subset index found! File {site_idx_file_name} does not exist!")
-            
+
             self.info(f"Client subset size: {len(site_idx)}")
-            
-            df = pd.read_csv(self.train_idx_root + '/data.csv', header=None)
-            
+
+            df = pd.read_csv(self.train_idx_root + '/data_train.csv', header=None)
+
             df.replace('', np.nan, inplace=True)
             df.fillna('missing', inplace=True)
             
             # Converti tutte le colonne in stringhe per evitare problemi con tipi misti
             df = df.astype(str)
-            
+
             # Converti i dati categorici in numeri
             label_encoders = {}
             for col in df.columns:
@@ -129,20 +113,20 @@ class MimicModelLearner(ModelLearner):
                     le = LabelEncoder()
                     df[col] = le.fit_transform(df[col])
                     label_encoders[col] = le
-            
+
             # Separa features e labels
             X = df.iloc[:, :-1].values  # Features
             y = df.iloc[:, -1].values  # Labels
-            
+
             # Dividi i dati in training e validation
             X_train, X_valid, y_train, y_valid = train_test_split(X[site_idx], y[site_idx], test_size=0.2, random_state=42)
-            
+
             # Converti in array NumPy esplicitamente, se necessario
             X_train = np.array(X_train, dtype=np.float32)
             y_train = np.array(y_train, dtype=np.float32)
             X_valid = np.array(X_valid, dtype=np.float32)
             y_valid = np.array(y_valid, dtype=np.float32)
-            
+
             self.train_dataset = (X_train, y_train)
             self.valid_dataset = (X_valid, y_valid)
 
@@ -160,12 +144,12 @@ class MimicModelLearner(ModelLearner):
             self.epoch_global = self.epoch_of_start_time + epoch
             self.info(f"Local epoch {self.site_name}: {epoch + 1}/{self.aggregation_epochs} (lr={self.lr})")
             avg_loss = 0.0
-            
+
             for _, (inputs, labels) in enumerate(train_loader):
                 with tf.GradientTape() as tape:
                     outputs = self.model(inputs, training=True)
                     loss = self.criterion(labels, outputs)
-                    
+
                     # FedProx loss term
                     if self.fedproxloss_mu > 0:
                         fed_prox_loss = self.criterion_prox(self.model, model_global)
@@ -176,15 +160,16 @@ class MimicModelLearner(ModelLearner):
                 avg_loss += loss.numpy()
 
             if val_freq > 0 and epoch % val_freq == 0:
-                acc = self.local_valid(self.valid_loader, tb_id="val_acc_local_model")
-                if acc > self.best_acc:
-                    self.best_acc = acc
+                auc = self.local_valid(self.valid_loader)
+                if auc > self.best_auc:
+                    self.best_auc = auc
                     self.save_model(is_best=True)
 
     def save_model(self, is_best=False):
         """Save model weights in HDF5 format"""
         file_path = self.best_local_model_file if is_best else self.local_model_file
         self.model.save_weights(file_path)
+        self.model.save_weights(os.path.join(self.app_root, f"{self.site_name}.weights.h5"))
 
     def train(self, model: FLModel) -> Union[str, FLModel]:
         self._create_datasets()
@@ -204,14 +189,12 @@ class MimicModelLearner(ModelLearner):
         self.local_train(self.train_loader, self.model, val_freq=1 if self.central else 0)
 
         # Validate after local train
-        acc = self.local_valid(self.valid_loader, tb_id="val_acc_local_model")
-        self.info(f"val_acc_local_model: {acc:.4f}")
-
-        log_performance('train', self.epoch_global, acc, acc)
+        auc = self.local_valid(self.valid_loader)
+        self.info(f"val_auc_local_model: {auc:.4f}")
 
         self.save_model(is_best=False)
-        if acc > self.best_acc:
-            self.best_acc = acc
+        if auc > self.best_auc:
+            self.best_auc = auc
             self.save_model(is_best=True)
 
         # Compute delta model
@@ -227,18 +210,23 @@ class MimicModelLearner(ModelLearner):
         self.info("Local epochs finished. Returning FLModel")
         return fl_model
 
-    def local_valid(self, valid_loader, tb_id=None):
+    def local_valid(self, valid_loader):
         """Validation using TensorFlow."""
         self.model.trainable = False
-        correct, total = 0, 0
+
+        auc_metric = AUC(name="auc", curve="ROC", num_thresholds=1000)
         for inputs, labels in valid_loader:
             outputs = self.model(inputs)
-            pred_label = tf.argmax(outputs, axis=1)
-            total += len(labels)
-            correct += np.sum(pred_label == tf.cast(labels, tf.int64))
 
-        metric = correct / total
-        return metric
+            if outputs.shape[-1] > 1:
+                probs = tf.nn.softmax(outputs)[:, 1]  # Per classificazione binaria da softmax
+            else:
+                probs = tf.nn.sigmoid(outputs)
+
+            auc_metric.update_state(labels, probs)
+
+        auc = auc_metric.result().numpy()
+        return auc
 
     def validate(self, model: FLModel) -> Union[str, FLModel]:
         """Validation for global model using TensorFlow."""
@@ -252,33 +240,21 @@ class MimicModelLearner(ModelLearner):
         else:
             self.model.set_weights(global_weights)
 
-        # get validation meta info
-        validate_type = FLModelUtils.get_meta_prop(
-            model, FLMetaKey.VALIDATE_TYPE, ValidateType.MODEL_VALIDATE
-        )  # TODO: enable model.get_meta_prop(...)
         model_owner = self.get_shareable_header(AppConstants.MODEL_OWNER)
 
         # perform valid
-        train_acc = self.local_valid(
-            self.train_loader,
-            tb_id="train_acc_global_model" if validate_type == ValidateType.BEFORE_TRAIN_VALIDATE else None,
-        )
-        self.info(f"training acc ({model_owner}): {train_acc:.4f}")
+        train_auc = self.local_valid(self.train_loader)
+        self.info(f"AUC: {train_auc:.4f}")
 
-        val_acc = self.local_valid(
-            self.valid_loader,
-            tb_id="val_acc_global_model" if validate_type == ValidateType.BEFORE_TRAIN_VALIDATE else None,
-        )
-        self.info(f"validation acc ({model_owner}): {val_acc:.4f}")
+        val_auc = self.local_valid(self.valid_loader)
+        self.info(f"AUC {model_owner}: {val_auc:.4f}")
         self.info("Evaluation finished. Returning result")
 
-        log_performance('validate', self.epoch_global, train_acc, val_acc)
-
-        if val_acc > self.best_acc:
-            self.best_acc = val_acc
+        if val_auc > self.best_auc:
+            self.best_auc = val_auc
             self.save_model(is_best=True)
 
-        return FLModel(metrics={"train_accuracy": train_acc, "val_accuracy": val_acc})
+        return FLModel(metrics={"train_auc": float(train_auc), "val_auc": float(val_auc)})
 
     def get_model(self, model_name: str) -> Union[str, FLModel]:
         if model_name == ModelName.BEST_MODEL:

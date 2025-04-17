@@ -6,8 +6,9 @@ class CNN(tf.keras.Model):
         super().__init__()
         self._input_shape = (None, input_dim)  # Aggiungi questo attributo
         self.model = models.Sequential([
-            layers.Dense(64, activation='relu', input_dim=input_dim),
-            layers.Dense(32, activation='relu'),
+            layers.Dense(16, activation='relu', input_dim=input_dim),
+            layers.Dense(16, activation='relu'),
+            layers.Dense(16, activation='relu'),
             layers.Dense(1, activation='sigmoid')
         ])
 
