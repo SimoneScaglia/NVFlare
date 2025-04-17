@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import socket
-
+import random
 
 def get_open_ports(number) -> list:
     """Gets the number of open ports from the system.
@@ -26,16 +26,17 @@ def get_open_ports(number) -> list:
     """
     ports = []
     sockets = []
-    for i in range(number):
+    while len(ports) < number:
+        local_port = random.randint(41000, 41050)
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.bind(("", 0))
-        s.listen(1)
-
-        # to prevent the same port number used multiple times, we only close it after all ports are obtained
-        sockets.append(s)
-        port = s.getsockname()[1]
-        if port > 0:
-            ports.append(port)
+        try:
+            s.bind(("0.0.0.0", local_port))
+            s.listen(1)
+            sockets.append(s)
+            ports.append(local_port)
+        except OSError:
+            s.close()
+            continue
 
     # close obtained ports
     for s in sockets:

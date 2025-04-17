@@ -28,8 +28,8 @@ from nvflare.security.logging import secure_format_exception
 
 log = logging.getLogger(__name__)
 
-LO_PORT = 1025
-HI_PORT = 65535
+LO_PORT = 41000
+HI_PORT = 41050
 MAX_ITER_SIZE = 10
 RANDOM_TRIES = 20
 BIND_TIME_OUT = 5
