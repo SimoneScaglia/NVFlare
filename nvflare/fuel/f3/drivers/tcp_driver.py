@@ -24,7 +24,6 @@ from nvflare.fuel.f3.drivers.driver_params import DriverCap, DriverParams
 from nvflare.fuel.f3.drivers.net_utils import get_ssl_context, get_tcp_urls
 from nvflare.fuel.f3.drivers.socket_conn import ConnectionHandler, SocketConnection
 from nvflare.security.logging import secure_format_exception
-import random
 
 log = logging.getLogger(__name__)
 
@@ -87,14 +86,6 @@ class TcpDriver(BaseDriver):
         context = get_ssl_context(params, ssl_server=False)
         if context:
             sock = context.wrap_socket(sock)
-
-        while(1):
-            local_port = random.randint(41000, 41050)
-            try:
-                sock.bind(("0.0.0.0", local_port))
-                break
-            except OSError:
-                continue
 
         sock.connect((host, port))
 
