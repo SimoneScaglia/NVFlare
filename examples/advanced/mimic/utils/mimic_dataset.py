@@ -5,7 +5,7 @@ import shutil
 import argparse
 from sklearn.model_selection import StratifiedShuffleSplit
 
-def create_site_files(data_path, idx_root, num_clients, stratify=False, client_weights=None):
+def create_site_files(data_path, idx_root, num_clients, stratify=False, client_splits=None):
     # Carica il dataset
     df = pd.read_csv(data_path)
     X = df.iloc[:, :-1].values
@@ -16,15 +16,10 @@ def create_site_files(data_path, idx_root, num_clients, stratify=False, client_w
     if num_clients > total_size:
         raise ValueError("Il numero di client è maggiore del numero di esempi nel dataset.")
     
-    if client_weights is not None:
-        if len(client_weights) != num_clients:
-            raise ValueError("La lunghezza di client_weights deve essere uguale a num_clients.")
-        if not np.isclose(sum(client_weights), 1.0, atol=1e-4):
-            raise ValueError("La somma dei pesi in client_weights deve essere 1.0.")
-        sizes = [int(total_size * w) for w in client_weights]
-        # Aggiustamento per compensare eventuali arrotondamenti
-        diff = total_size - sum(sizes)
-        sizes[-1] += diff
+    if client_splits is not None:
+        if len(client_splits) != num_clients:
+            raise ValueError("La lunghezza di client_splits deve essere uguale a num_clients.")
+        sizes = [int(total_size * w) for w in client_splits]
     else:
         # Distribuzione uniforme se non specificato
         sizes = [total_size // num_clients] * num_clients
@@ -87,7 +82,7 @@ def main():
     parser = argparse.ArgumentParser(description="Script per suddividere il dataset in file per ogni client.")
     parser.add_argument('num_clients', type=int, help="Numero di client.")
     parser.add_argument('--stratify', action='store_true', help="Usa stratificazione per le classi.")
-    parser.add_argument('--weights', type=float, nargs='+', help="Percentuali di dati per ciascun client (devono sommare a 1.0)")
+    parser.add_argument('--weights', type=float, nargs='+', help="Percentuali di dati per ciascun client")
 
     args = parser.parse_args()
 
@@ -97,7 +92,7 @@ def main():
     os.makedirs(idx_root, exist_ok=True)
     shutil.copy(data_path, idx_root)
 
-    create_site_files(data_path, idx_root, args.num_clients, stratify=args.stratify, client_weights=args.weights)
+    create_site_files(data_path, idx_root, args.num_clients, stratify=args.stratify, client_splits=args.weights)
 
 if __name__ == "__main__":
     main()
