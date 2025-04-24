@@ -10,7 +10,6 @@ from nvflare.app_common.utils.fl_model_utils import FLModelUtils
 from nvflare.app_opt.tf.fedprox_loss import TFFedProxLoss
 from mimic.networks.mimic_nets import CNN
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
 from nvflare.app_common.app_constant import AppConstants, ModelName
 from tensorflow.keras.metrics import AUC
 
@@ -88,40 +87,19 @@ class MimicModelLearner(ModelLearner):
     def _create_datasets(self):
         """Load the tabular datasets, split for training and validation."""
         if self.train_dataset is None or self.train_loader is None:
-            site_idx_file_name = os.path.join(self.train_idx_root, self.site_name + ".npy")
+            csv_file_path = os.path.join(self.train_idx_root, self.site_name + ".csv")
 
-            if os.path.exists(site_idx_file_name):
-                site_idx = np.load(site_idx_file_name)
-                site_idx = np.array(site_idx, dtype=np.int32)
-            else:
-                self.stop_task(f"No subset index found! File {site_idx_file_name} does not exist!")
+            if not os.path.exists(csv_file_path):
+                self.stop_task(f"No dataset found! File {csv_file_path} does not exist!")
 
-            self.info(f"Client subset size: {len(site_idx)}")
+            df = pd.read_csv(csv_file_path)
 
-            df = pd.read_csv(self.train_idx_root + '/data_train.csv', header=None)
+            # Assumiamo che l'ultima colonna sia il target
+            X = df.iloc[:, :-1].values
+            y = df.iloc[:, -1].values
 
-            df.replace('', np.nan, inplace=True)
-            df.fillna('missing', inplace=True)
-            
-            # Converti tutte le colonne in stringhe per evitare problemi con tipi misti
-            df = df.astype(str)
-
-            # Converti i dati categorici in numeri
-            label_encoders = {}
-            for col in df.columns:
-                if df[col].nunique() < 20:  # Considera una colonna categorica se ha meno di 20 valori unici
-                    le = LabelEncoder()
-                    df[col] = le.fit_transform(df[col])
-                    label_encoders[col] = le
-
-            # Separa features e labels
-            X = df.iloc[:, :-1].values  # Features
-            y = df.iloc[:, -1].values  # Labels
-
-            # Dividi i dati in training e validation
-            X_train, X_valid, y_train, y_valid = train_test_split(X[site_idx], y[site_idx], test_size=0.2, random_state=42)
-
-            # Converti in array NumPy esplicitamente, se necessario
+            # Divisione train/validation
+            X_train, X_valid, y_train, y_valid = train_test_split(X, y, test_size=0.2, random_state=42)
             X_train = np.array(X_train, dtype=np.float32)
             y_train = np.array(y_train, dtype=np.float32)
             X_valid = np.array(X_valid, dtype=np.float32)

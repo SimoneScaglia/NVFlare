@@ -10,8 +10,8 @@ from mimic_nets import CNN
 
 DEFAULT_ITER=5
 
-def validate_global_models(data_path, models_path, num_clients, weights):
-    if not np.isclose(sum(weights), 1.0, atol=1e-4): # Se la somma dei pesi non fa 1
+def validate_global_models(data_path, models_path, iteration, num_clients, weights):
+    if not np.isclose(sum(weights), 100.0, atol=1e-4):
         results_dir = f'/tmp/nvflare/results/1host_{num_clients}nodes_data/swarm_results'
         os.makedirs(results_dir, exist_ok=True)
         results_file = os.path.join(results_dir, f'aucs.csv')
@@ -31,9 +31,6 @@ def validate_global_models(data_path, models_path, num_clients, weights):
     else:
         results_df = pd.DataFrame(columns=['user', 'split', 'auc', 'iteration'])
     
-    iteration = int(results_df.iloc[-1]['iteration']) + 1 if not results_df.empty else 0
-    iteration = 0 if iteration == DEFAULT_ITER else iteration
-    
     for j in range(1, num_clients + 1):
         model_path = os.path.join(models_path, f'site-{j}', 'simulate_job', f'app_site-{j}', f'site-{j}.weights.h5')
         
@@ -49,7 +46,7 @@ def validate_global_models(data_path, models_path, num_clients, weights):
             y_pred = model.predict(X_test).flatten()
             auc = roc_auc_score(y_test, y_pred)
             
-            weight = weights[j - 1] if weights else 1.0/num_clients
+            weight = weights[j - 1] if weights else 100.0/num_clients
             new_row = {'user': j, 'split': weight, 'auc': auc, 'iteration': iteration}
             
             results_df = pd.concat([results_df, pd.DataFrame([new_row])], ignore_index=True)
@@ -64,15 +61,16 @@ def main():
     os.chdir(script_dir)
 
     parser = argparse.ArgumentParser(description="Script per validare il modello globale.")
+    parser.add_argument('iteration', type=int, help="Iterazione.")
     parser.add_argument('num_clients', type=int, help="Numero di client.")
-    parser.add_argument('--weights', type=float, nargs='+', help="Percentuali di dati per ciascun client (devono sommare a 1.0)")
+    parser.add_argument('--weights', type=float, nargs='+', help="Percentuali di dati per ciascun client (devono sommare a 100.0)")
 
     args = parser.parse_args()
 
-    data_path = '../dataset/data_test.csv'
+    data_path = '../dataset/mimiciii_test.csv'
     models_path = f'/tmp/nvflare/mimic_swarm_{args.num_clients}'
 
-    validate_global_models(data_path, models_path, args.num_clients, args.weights)
+    validate_global_models(data_path, models_path, args.iteration, args.num_clients, args.weights)
 
 if __name__ == "__main__":
     main()
