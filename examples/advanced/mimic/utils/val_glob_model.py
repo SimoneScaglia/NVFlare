@@ -2,6 +2,7 @@ import os
 import argparse
 import sys
 import pandas as pd
+import numpy as np
 from sklearn.metrics import roc_auc_score
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../networks'))
@@ -10,9 +11,14 @@ from mimic_nets import CNN
 DEFAULT_ITER=5
 
 def validate_global_models(data_path, models_path, num_clients, weights):
-    results_dir = '/tmp/nvflare/results'
-    os.makedirs(results_dir, exist_ok=True)
-    results_file = os.path.join(results_dir, f'aucs_{num_clients}_nodes.csv')
+    if not np.isclose(sum(weights), 1.0, atol=1e-4): # Se la somma dei pesi non fa 1
+        results_dir = f'/tmp/nvflare/results/1host_{num_clients}nodes_data/swarm_results'
+        os.makedirs(results_dir, exist_ok=True)
+        results_file = os.path.join(results_dir, f'aucs.csv')
+    else:
+        results_dir = f'/tmp/nvflare/results/1host_{num_clients}nodes/swarm_results'
+        os.makedirs(results_dir, exist_ok=True)
+        results_file = os.path.join(results_dir, f'aucs.csv')
     
     data = pd.read_csv(data_path)
     X_test = data.iloc[:, :-1].values

@@ -33,6 +33,8 @@ cd ../../..
 # Install NVFLARE and dependencies
 pip install -e .
 pip install pandas scikit-learn tensorflow
+
+nvflare config -jt job_templates/
 ```
 
 ## 🧪 Running the Experiment
