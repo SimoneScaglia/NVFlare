@@ -14,7 +14,6 @@
 
 import argparse
 
-from src.lit_net import LitNet
 from src.net import Net
 
 from nvflare.app_opt.pt.job_config.fed_avg import FedAvgJob
@@ -53,7 +52,7 @@ def main():
         n_clients=n_clients,
         num_rounds=num_rounds,
         key_metric=key_metric,
-        initial_model=LitNet() if "lightning" in script else Net(),
+        initial_model=Net(),
     )
 
     for i in range(n_clients):
