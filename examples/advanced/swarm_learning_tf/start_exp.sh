@@ -11,7 +11,7 @@ source swarm_env/bin/activate
 # ./prepare_data.sh "$num_clients" "${weights[@]}"
 python3 prepare_data_from_csv.py "$iteration" "$num_clients" "${weights[@]}"
 
-cp -r ../mimic ./code/
+rsync -av --exclude='dataset' --exclude='dataset_old' ../mimic ./code/
 
 nvflare job create -j ./jobs/mimic_swarm_"$num_clients" -w swarm_cse_tf_model_learner -sd ./code -force
 
