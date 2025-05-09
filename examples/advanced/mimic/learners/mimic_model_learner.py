@@ -8,10 +8,9 @@ from nvflare.app_common.abstract.fl_model import FLModel, ParamsType
 from nvflare.app_common.abstract.model_learner import ModelLearner
 from nvflare.app_common.utils.fl_model_utils import FLModelUtils
 from nvflare.app_opt.tf.fedprox_loss import TFFedProxLoss
-from mimic.networks.mimic_nets import CNN
+from mimic.networks.mimic_nets import CNN, get_opt, get_metrics
 from sklearn.model_selection import train_test_split
 from nvflare.app_common.app_constant import AppConstants, ModelName
-from tensorflow.keras.metrics import AUC
 
 class MimicModelLearner(ModelLearner):
     def __init__(
@@ -77,7 +76,7 @@ class MimicModelLearner(ModelLearner):
         self.best_local_model_file = os.path.join(self.app_root, "best_local_model.weights.h5")
 
         self.model = CNN()
-        self.optimizer = tf.keras.optimizers.Adam(learning_rate=self.lr)
+        self.optimizer = get_opt()
         self.criterion = tf.keras.losses.BinaryCrossentropy()
 
         if self.fedproxloss_mu > 0:
@@ -108,14 +107,14 @@ class MimicModelLearner(ModelLearner):
             self.train_dataset = (X_train, y_train)
             self.valid_dataset = (X_valid, y_valid)
 
-            self.train_loader = tf.data.Dataset.from_tensor_slices((X_train, y_train)).batch(self.batch_size)
-            self.valid_loader = tf.data.Dataset.from_tensor_slices((X_valid, y_valid)).batch(self.batch_size)
+            self.train_loader = tf.data.Dataset.from_tensor_slices(self.train_dataset).batch(self.batch_size).prefetch(tf.data.AUTOTUNE)
+            self.valid_loader = tf.data.Dataset.from_tensor_slices(self.valid_dataset).batch(self.batch_size).prefetch(tf.data.AUTOTUNE)
 
     def finalize(self):
         """Finalize resources like threads or open files."""
         pass
 
-    def local_train(self, train_loader, model_global, val_freq: int = 0):
+    def local_train(self, train_loader, global_weights, val_freq: int = 0):
         """Training loop using TensorFlow."""
         for epoch in range(self.aggregation_epochs):
             self.model.trainable = True
@@ -123,15 +122,15 @@ class MimicModelLearner(ModelLearner):
             self.info(f"Local epoch {self.site_name}: {epoch + 1}/{self.aggregation_epochs} (lr={self.lr})")
             avg_loss = 0.0
 
-            for _, (inputs, labels) in enumerate(train_loader):
+            for x, y in train_loader:
                 with tf.GradientTape() as tape:
-                    outputs = self.model(inputs, training=True)
-                    loss = self.criterion(labels, outputs)
-
-                    # FedProx loss term
+                    out = self.model(x, training=True)
+                    base_loss = self.criterion(y, out)
                     if self.fedproxloss_mu > 0:
-                        fed_prox_loss = self.criterion_prox(self.model, model_global)
-                        loss += fed_prox_loss
+                        prox = self.criterion_prox(self.model.trainable_variables, list(global_weights.values()))
+                        loss = base_loss + prox
+                    else:
+                        loss = base_loss
 
                 gradients = tape.gradient(loss, self.model.trainable_variables)
                 self.optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
@@ -158,13 +157,10 @@ class MimicModelLearner(ModelLearner):
 
         # Update local model weights with received weights
         global_weights = model.params
-        if isinstance(global_weights, dict):
-            self.model.set_weights(list(global_weights.values()))
-        else:
-            self.model.set_weights(global_weights)
+        self.model.set_weights(list(global_weights.values()) if isinstance(global_weights, dict) else global_weights)
 
         # Local train steps
-        self.local_train(self.train_loader, self.model, val_freq=1 if self.central else 0)
+        self.local_train(self.train_loader, global_weights, val_freq=1 if self.central else 0)
 
         # Validate after local train
         auc = self.local_valid(self.valid_loader)
@@ -177,12 +173,11 @@ class MimicModelLearner(ModelLearner):
 
         # Compute delta model
         local_weights = self.model.get_weights()
-        model_diff = {}
-        for idx, (layer_name, global_weight) in enumerate(global_weights.items()):
-            model_weight = local_weights[idx]
-            model_diff[layer_name] = model_weight - global_weight
+        model_dict = {}
+        for idx, (layer_name, _) in enumerate(global_weights.items()):
+            model_dict[layer_name] = local_weights[idx].astype(np.float32)
 
-        fl_model = FLModel(params_type=ParamsType.DIFF, params=model_diff)
+        fl_model = FLModel(params_type=ParamsType.FULL, params=model_dict)
 
         FLModelUtils.set_meta_prop(fl_model, FLMetaKey.NUM_STEPS_CURRENT_ROUND, len(self.train_loader))
         self.info("Local epochs finished. Returning FLModel")
@@ -192,7 +187,7 @@ class MimicModelLearner(ModelLearner):
         """Validation using TensorFlow."""
         self.model.trainable = False
 
-        auc_metric = AUC(name="auc", curve="ROC", num_thresholds=1000)
+        auc_metric = get_metrics()[0]
         for inputs, labels in valid_loader:
             outputs = self.model(inputs)
 
@@ -200,11 +195,13 @@ class MimicModelLearner(ModelLearner):
                 probs = tf.nn.softmax(outputs)[:, 1]  # Per classificazione binaria da softmax
             else:
                 probs = tf.nn.sigmoid(outputs)
+                probs = tf.squeeze(probs, axis=-1)
+
+            labels = tf.cast(tf.reshape(labels, [-1]), tf.float32)
 
             auc_metric.update_state(labels, probs)
 
-        auc = auc_metric.result().numpy()
-        return auc
+        return auc_metric.result().numpy()
 
     def validate(self, model: FLModel) -> Union[str, FLModel]:
         """Validation for global model using TensorFlow."""
@@ -213,10 +210,7 @@ class MimicModelLearner(ModelLearner):
         self.info(f"Client identity: {self.site_name}")
 
         global_weights = model.params
-        if isinstance(global_weights, dict):
-            self.model.set_weights(list(global_weights.values()))
-        else:
-            self.model.set_weights(global_weights)
+        self.model.set_weights(list(global_weights.values()) if isinstance(global_weights, dict) else global_weights)
 
         model_owner = self.get_shareable_header(AppConstants.MODEL_OWNER)
 

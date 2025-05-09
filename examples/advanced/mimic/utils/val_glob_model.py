@@ -9,14 +9,17 @@ from datetime import datetime
 sys.path.append(os.path.join(os.path.dirname(__file__), '../networks'))
 from mimic_nets import CNN
 
-DEFAULT_ITER=5
+DEFAULT_ITER = 5
 
 def validate_global_models(data_path, models_path, iteration, num_clients, weights):
     if not np.isclose(sum(weights), 100.0, atol=1e-1):
+        is_data = True
         results_dir = f'/tmp/nvflare/results/1host_{num_clients}nodes_data/swarm_results'
         os.makedirs(results_dir, exist_ok=True)
         results_file = os.path.join(results_dir, f'aucs.csv')
     else:
+        is_data = False
+        weights = weights[::-1]
         results_dir = f'/tmp/nvflare/results/1host_{num_clients}nodes/swarm_results'
         os.makedirs(results_dir, exist_ok=True)
         results_file = os.path.join(results_dir, f'aucs.csv')
@@ -30,7 +33,7 @@ def validate_global_models(data_path, models_path, iteration, num_clients, weigh
     if os.path.exists(results_file):
         results_df = pd.read_csv(results_file)
     else:
-        results_df = pd.DataFrame(columns=['datetime', 'user', 'split', 'auc', 'iteration'])
+        results_df = pd.DataFrame(columns=['datetime', 'user', 'splits', 'auc', 'iteration'])
     
     for j in range(1, num_clients + 1):
         model_path = os.path.join(models_path, f'site-{j}', 'simulate_job', f'app_site-{j}', f'site-{j}.weights.h5')
@@ -48,7 +51,7 @@ def validate_global_models(data_path, models_path, iteration, num_clients, weigh
             auc = roc_auc_score(y_test, y_pred)
             
             weight = weights[j - 1] if weights else 100.0/num_clients
-            new_row = {'datetime': datetime.now(), 'user': j, 'split': weight, 'auc': auc, 'iteration': iteration}
+            new_row = {'datetime': datetime.now(), 'user': j+1 if is_data else j, 'splits': weight, 'auc': auc, 'iteration': iteration}
             
             results_df = pd.concat([results_df, pd.DataFrame([new_row])], ignore_index=True)
         except Exception as e:
@@ -68,7 +71,7 @@ def main():
 
     args = parser.parse_args()
 
-    data_path = '../dataset/mimiciv_test.csv'
+    data_path = '../dataset/mimiciii_test.csv'
     models_path = f'/tmp/nvflare/mimic_swarm_{args.num_clients}'
 
     validate_global_models(data_path, models_path, args.iteration, args.num_clients, args.weights)
