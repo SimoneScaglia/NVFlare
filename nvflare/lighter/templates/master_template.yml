@@ -275,6 +275,8 @@ fed_server: |
                 "target": "{~~target~~}",
                 "scheme": "{~~scheme~~}"
             },
+            "admin_server": "{~~admin_server~~}",
+            "admin_port": {~~admin_port~~},
             "ssl_private_key": "server.key",
             "ssl_cert": "server.crt",
             "ssl_root_cert": "rootCA.pem",
@@ -316,6 +318,7 @@ default_admin_resources: |
       "idle_timeout": 900.0,
       "login_timeout": 10.0,
       "with_debug": false,
+      "authenticate_msg_timeout": 2.0,
       "prompt": "> "
     }
   }
