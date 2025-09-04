@@ -19,16 +19,14 @@ import shutil
 import socket
 import subprocess
 import tempfile
-import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import grpc
-from requests import Request, RequestException, Response, Session, codes
+from requests import Request, Response, Session
 from requests.adapters import HTTPAdapter
 
 
 class NVFlareConfig:
-    OVERSEER = "gunicorn.conf.py"
     SERVER = "fed_server.json"
     CLIENT = "fed_client.json"
     ADMIN = "fed_admin.json"
@@ -97,19 +95,16 @@ def parse_overseer_agent_args(overseer_agent_conf: dict, required_args: list) ->
     return result
 
 
-def construct_dummy_response(overseer_agent_args: dict) -> Response:
+def construct_dummy_overseer_response(overseer_agent_conf: dict, role: str) -> Response:
+    overseer_agent_class = overseer_agent_conf.get("path")
+    required_args = get_required_args_for_overseer_agent(overseer_agent_class=overseer_agent_class, role=role)
+    overseer_agent_args = parse_overseer_agent_args(overseer_agent_conf, required_args)
     psp = {"sp_end_point": overseer_agent_args["sp_end_point"], "primary": True}
     response_content = {"primary_sp": psp, "sp_list": [psp]}
     resp = Response()
     resp.status_code = 200
     resp._content = str.encode(json.dumps(response_content))
     return resp
-
-
-def is_dummy_overseer_agent(overseer_agent_class: str) -> bool:
-    if overseer_agent_class == "nvflare.ha.dummy_overseer_agent.DummyOverseerAgent":
-        return True
-    return False
 
 
 def get_required_args_for_overseer_agent(overseer_agent_class: str, role: str) -> list:
@@ -153,42 +148,22 @@ def split_by_len(item, max_len):
     return [item[ind : ind + max_len] for ind in range(0, len(item), max_len)]
 
 
-def check_overseer_running(
-    startup: str, overseer_agent_args: dict, role: str, retry: int = 3
-) -> Tuple[Optional[Response], Optional[str]]:
-    """Checks if overseer is running."""
-    session = _create_http_session(
-        ca_path=os.path.join(startup, _get_ca_cert_file_name()),
-        cert_path=os.path.join(startup, _get_cert_file_name(role)),
-        prv_key_path=os.path.join(startup, _get_prv_key_file_name(role)),
-    )
-    data = _prepare_data(overseer_agent_args)
-    try_count = 0
-    retry_delay = 1
-    resp = None
-    err = None
-    while try_count < retry:
-        try:
-            resp = _send_request(
-                session,
-                api_point=overseer_agent_args["overseer_end_point"] + "/heartbeat",
-                payload=data,
-            )
-            if resp:
-                break
-        except RequestException as e:
-            try_count += 1
-            time.sleep(retry_delay)
-            err = str(e)
-    return resp, err
+def _get_conn_sec(startup: str):
+    # get connection security
+    # first try to see whether this is a client config.
+    client_config = os.path.join(startup, "fed_client.json")
+    if os.path.exists(client_config):
+        with open(client_config, "r") as f:
+            config = json.load(f)
+            return config["client"].get("connection_security", "mtls")
 
-
-def check_response(resp: Optional[Response]) -> bool:
-    if not resp:
-        return False
-    if resp.status_code != codes.ok:
-        return False
-    return True
+    # try admin config
+    admin_config = os.path.join(startup, "fed_admin.json")
+    if os.path.exists(admin_config):
+        with open(admin_config, "r") as f:
+            config = json.load(f)
+            return config["admin"].get("connection_security", "mtls")
+    return "mtls"
 
 
 def check_grpc_server_running(startup: str, host: str, port: int, token=None) -> bool:
@@ -199,6 +174,11 @@ def check_grpc_server_running(startup: str, host: str, port: int, token=None) ->
     with open(os.path.join(startup, _get_cert_file_name(NVFlareRole.CLIENT)), "rb") as f:
         certificate_chain = f.read()
 
+    conn_sec = _get_conn_sec(startup)
+    secure = True
+    if conn_sec == "clear":
+        secure = False
+
     call_credentials = grpc.metadata_call_credentials(
         lambda context, callback: callback((("x-custom-token", token),), None)
     )
@@ -207,7 +187,11 @@ def check_grpc_server_running(startup: str, host: str, port: int, token=None) ->
     )
 
     composite_credentials = grpc.composite_channel_credentials(credentials, call_credentials)
-    channel = grpc.secure_channel(target=f"{host}:{port}", credentials=composite_credentials)
+    if secure:
+        channel = grpc.secure_channel(target=f"{host}:{port}", credentials=composite_credentials)
+    else:
+        channel = grpc.insecure_channel(target=f"{host}:{port}")
+
     try:
         grpc.channel_ready_future(channel).result(timeout=10)
     except grpc.FutureTimeoutError:

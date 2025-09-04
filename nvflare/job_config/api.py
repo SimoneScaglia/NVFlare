@@ -203,6 +203,18 @@ class FedJob:
         self._deployed = False
         self._components = {}
 
+    def set_app_packages(self, app_packages: List[str]):
+        """Set app packages.
+        When generating job config, code from these packages will not be included into "custom" folder.
+
+        Args:
+            app_packages: app packages to be set
+
+        Returns: None
+
+        """
+        self.job.set_app_packages(app_packages)
+
     def set_up_client(self, target: str):
         """Setup routine called by FedJob when first sending object to a client target.
 
@@ -547,7 +559,7 @@ class FedJob:
             self._deployed = True
 
     def export_job(self, job_root: str):
-        """Export job config to `job_root` directory with name `self.job_name`.
+        """Export job config to `job_root` directory with name `self.name`.
         For end users.
 
         Args:
@@ -560,7 +572,13 @@ class FedJob:
         self.job.generate_job_config(job_root)
 
     def simulator_run(
-        self, workspace: str, n_clients: int = None, threads: int = None, gpu: str = None, log_config: str = None
+        self,
+        workspace: str,
+        n_clients: Optional[int] = None,
+        clients: Optional[List[str]] = None,
+        threads: Optional[int] = None,
+        gpu: Optional[str] = None,
+        log_config: Optional[str] = None,
     ):
         """Run the job with the simulator with the `workspace` using `clients` and `threads`.
         For end users.
@@ -568,13 +586,15 @@ class FedJob:
         Args:
             workspace: workspace directory for job.
             n_clients: number of clients.
+            clients: client names.
             threads: number of threads.
             gpu: gpu assignments for simulating clients, comma separated
             log_config: log config mode ('concise', 'default', 'verbose'), filepath, or level
 
         Returns:
-
         """
+        if clients:
+            self.clients = clients
         self._set_all_apps()
 
         if ALL_SITES in self.clients and not n_clients:

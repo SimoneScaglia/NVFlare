@@ -265,7 +265,7 @@ def verify_folder_signature(src_folder, root_ca_path):
                         public_key=public_key,
                     )
         return True
-    except Exception as e:
+    except Exception:
         return False
 
 
@@ -285,7 +285,6 @@ def sign_all(content_folder, signing_pri_key):
 def load_yaml(file):
 
     root = os.path.split(file)[0]
-    yaml_data = None
     if isinstance(file, str) or isinstance(file, Path):
         with open(file, "r") as f:
             yaml_data = yaml.safe_load(f)

@@ -11,17 +11,267 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+import os
+import shutil
+import tempfile
+import time
+from typing import Optional
+
+from pydantic import BaseModel, conint, model_validator
+
+from nvflare.fuel.flare_api.flare_api import new_secure_session
 from nvflare.job_config.api import FedJob
-from nvflare.recipe.spec import ExecEnv
+from nvflare.tool.poc.poc_commands import (
+    _clean_poc,
+    _start_poc,
+    _stop_poc,
+    get_poc_workspace,
+    get_prod_dir,
+    is_poc_running,
+    prepare_poc_provision,
+    setup_service_config,
+)
+from nvflare.tool.poc.service_constants import FlareServiceConstants as SC
+
+from .spec import ExecEnv, ExecEnvType
+
+STOP_POC_TIMEOUT = 10
+SERVICE_START_TIMEOUT = 3
+DEFAULT_ADMIN_USER = "admin@nvidia.com"
 
 
-class POCExecEnv(ExecEnv):
+# Internal — not part of the public API
+class _PocEnvValidator(BaseModel):
+    num_clients: Optional[conint(gt=0)] = None
+    clients: Optional[list[str]] = None
+    gpu_ids: Optional[list[int]] = None
+    use_he: bool = False
+    docker_image: Optional[str] = None
+    project_conf_path: str = ""
+    username: str = DEFAULT_ADMIN_USER
 
-    def __init__(self, num_clients: int = 2):
-        self.num_clients = num_clients
+    @model_validator(mode="after")
+    def check_client_configuration(self):
+        # Check if clients list is empty
+        if self.clients is not None and len(self.clients) == 0:
+            raise ValueError("clients list cannot be empty")
+
+        # Check if both num_clients and clients are specified and inconsistent
+        if self.clients is not None and self.num_clients > 0 and len(self.clients) != self.num_clients:
+            raise ValueError(
+                f"Inconsistent: num_clients={self.num_clients} but clients list has {len(self.clients)} entries"
+            )
+
+        # Check if num_clients is valid when clients is None
+        if self.clients is None and self.num_clients <= 0:
+            raise ValueError("num_clients must be greater than 0")
+
+        return self
+
+
+class POCEnv(ExecEnv):
+    """Proof of Concept execution environment for local testing and development.
+
+    This environment sets up a POC deployment on a single machine with multiple
+    processes representing the server, clients, and admin console.
+    """
+
+    def __init__(
+        self,
+        *,
+        num_clients: Optional[int] = 2,
+        clients: Optional[list[str]] = None,
+        gpu_ids: Optional[list[int]] = None,
+        use_he: bool = False,
+        docker_image: str = None,
+        project_conf_path: str = "",
+        username: str = DEFAULT_ADMIN_USER,
+    ):
+        """Initialize POC execution environment.
+
+        Args:
+            num_clients (int, optional): Number of clients to use in POC mode. Defaults to 2.
+            clients (list[str], optional): List of client names. If None, will generate site-1, site-2, etc. Defaults to None.
+                If specified, number_of_clients argument will be ignored.
+            gpu_ids (list[int], optional): List of GPU IDs to assign to clients. If None, uses CPU only. Defaults to None.
+            use_he (bool, optional): Whether to use HE. Defaults to False.
+            docker_image (str, optional): Docker image to use for POC. Defaults to None.
+            project_conf_path (str, optional): Path to the project configuration file. Defaults to "".
+                If specified, 'number_of_clients','clients' and 'docker' specific options will be ignored.
+            username (str, optional): Admin user. Defaults to "admin@nvidia.com".
+        """
+        v = _PocEnvValidator(
+            num_clients=num_clients,
+            clients=clients,
+            gpu_ids=gpu_ids,
+            use_he=use_he,
+            docker_image=docker_image,
+            project_conf_path=project_conf_path,
+            username=username,
+        )
+
+        self.clients = v.clients
+        self.num_clients = len(v.clients) if v.clients is not None else v.num_clients
+        self.poc_workspace = get_poc_workspace()
+        self.gpu_ids = v.gpu_ids or []
+        self.use_he = v.use_he
+        self.project_conf_path = v.project_conf_path
+        self.docker_image = v.docker_image
+        self.username = v.username
+
+    def get_env_info(self) -> dict:
+        return {
+            "env_type": ExecEnvType.POC,
+            "startup_kit_location": self._get_admin_startup_kit_path(),
+            "num_clients": self.num_clients,
+            "gpu_ids": self.gpu_ids,
+            "use_he": self.use_he,
+            "docker_image": self.docker_image,
+            "project_conf_path": self.project_conf_path,
+            "username": self.username,
+        }
 
     def deploy(self, job: FedJob):
-        # TBD
-        # first launch a POC system;
-        # then submit job to it.
-        pass
+        """Deploy a FedJob to the POC environment.
+
+        Args:
+            job (FedJob): The FedJob to deploy.
+
+        Returns:
+            str: Job ID or deployment result.
+        """
+        if self._check_poc_running():
+            self.stop(clean_poc=True)
+
+        print("Preparing and starting fresh POC services...")
+        prepare_poc_provision(
+            clients=self.clients or [],  # Empty list if None, let prepare_clients generate
+            number_of_clients=self.num_clients,
+            workspace=self.poc_workspace,
+            docker_image=self.docker_image,
+            use_he=self.use_he,
+            project_conf_path=self.project_conf_path,
+            examples_dir=None,
+        )
+
+        _start_poc(
+            poc_workspace=self.poc_workspace,
+            gpu_ids=self.gpu_ids,
+            excluded=[self.username],
+            services_list=[],
+        )
+        print("POC services started successfully")
+
+        # Give services time to start up
+        time.sleep(SERVICE_START_TIMEOUT)
+
+        # Submit job using Flare API like ProdEnv
+        with tempfile.TemporaryDirectory() as temp_dir:
+            job.export_job(temp_dir)
+            job_path = os.path.join(temp_dir, job.name)
+
+            return self._submit_and_monitor_job(job_path, job.name)
+
+    def _check_poc_running(self) -> bool:
+        try:
+            project_config, service_config = setup_service_config(self.poc_workspace)
+        except Exception as e:
+            # POC workspace is not initialized yet, so we don't need to stop and clean it
+            return False
+
+        if not is_poc_running(self.poc_workspace, service_config, project_config):
+            return False
+
+        return True
+
+    def stop(self, clean_poc: bool = False):
+        """Try to stop and clean existing POC.
+
+        Args:
+            clean_poc (bool, optional): Whether to clean the POC workspace. Defaults to False.
+        """
+        project_config, service_config = setup_service_config(self.poc_workspace)
+
+        try:
+            print("Stopping existing POC services...")
+            _stop_poc(
+                poc_workspace=self.poc_workspace,
+                excluded=[self.username],  # Exclude admin console (consistent with start)
+                services_list=[],
+            )
+            count = 0
+            poc_running = True
+            while count < STOP_POC_TIMEOUT:
+                if not is_poc_running(self.poc_workspace, service_config, project_config):
+                    poc_running = False
+                    break
+                time.sleep(1)
+                count += 1
+
+            if clean_poc:
+                if poc_running:
+                    print(
+                        f"Warning: POC still running after {STOP_POC_TIMEOUT} seconds, cannot clean workspace. Skipping cleanup."
+                    )
+                else:
+                    _clean_poc(self.poc_workspace)
+        except Exception as e:
+            print(f"Warning: Failed to stop and clean existing POC: {e}")
+        print(f"Removing POC workspace: {self.poc_workspace}")
+        shutil.rmtree(self.poc_workspace, ignore_errors=True)
+
+    def _submit_and_monitor_job(self, job_path: str, job_name: str) -> str:
+        """Submit and monitor job via Flare API using a single session.
+
+        Args:
+            job_path: Path to the exported job directory.
+            job_name: Name of the job for logging.
+
+        Returns:
+            str: Job ID returned by the system.
+        """
+        sess = None
+        try:
+            # Get the admin startup kit path for POC
+            admin_dir = self._get_admin_startup_kit_path()
+
+            # Create secure session with POC admin (reuse for both submit and monitor)
+            sess = new_secure_session(
+                username=self.username,
+                startup_kit_location=admin_dir,
+            )
+
+            # Submit the job
+            job_id = sess.submit_job(job_path)
+
+            return job_id
+        except Exception as e:
+            raise RuntimeError(f"Failed to submit/monitor job via Flare API: {e}")
+
+        finally:
+            if sess:
+                sess.close()
+
+    def _get_admin_startup_kit_path(self) -> str:
+        """Get the path to the admin startup kit for POC.
+
+        Returns:
+            str: Path to admin startup kit directory.
+        """
+        try:
+            project_config, service_config = setup_service_config(self.poc_workspace)
+            project_name = project_config.get("name")
+            prod_dir = get_prod_dir(self.poc_workspace, project_name)
+
+            # POC admin directory structure: {workspace}/{project_name}/prod_00/admin@nvidia.com
+            project_admin_dir = service_config.get(SC.FLARE_PROJ_ADMIN, SC.FLARE_PROJ_ADMIN)
+            admin_dir = os.path.join(prod_dir, project_admin_dir)
+
+            if not os.path.exists(admin_dir):
+                raise RuntimeError(f"Admin startup kit not found at: {admin_dir}")
+
+            return admin_dir
+
+        except Exception as e:
+            raise RuntimeError(f"Failed to locate admin startup kit: {e}")

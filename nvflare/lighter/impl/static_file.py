@@ -545,7 +545,7 @@ class StaticFileBuilder(Builder):
     def prepare_admin_config(self, admin: Participant, ctx: ProvisionContext):
         project = ctx.get_project()
         server = project.get_server()
-        conn_sec = server.get_prop_fb(PropKey.CONN_SECURITY)
+        conn_sec = admin.get_prop_fb(PropKey.CONN_SECURITY)
         if not conn_sec:
             conn_sec = ConnSecurity.MTLS
 
@@ -869,7 +869,7 @@ class StaticFileBuilder(Builder):
 
     @staticmethod
     def _append(content: str, participant: Participant) -> str:
-        return content + f"./{participant.name}/startup/start.sh\n"
+        return content + f"$BASE_DIR/{participant.name}/startup/start.sh\n"
 
     def _create_start_all(self, project: Project, ctx: ProvisionContext):
         """Create the start_all.sh script to be used for starting all sites (server, relays and clients).
@@ -882,8 +882,7 @@ class StaticFileBuilder(Builder):
         Returns: None
 
         """
-        content = "#!/usr/bin/env bash\n"
-
+        content = '#!/usr/bin/env bash\nBASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
         server = project.get_server()
         content = self._append(content, server)
 
