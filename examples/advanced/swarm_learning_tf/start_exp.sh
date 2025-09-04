@@ -8,8 +8,7 @@ weights=("$@")
 
 source swarm_env/bin/activate
 
-min_responses=$((num_clients - 1))
-sed -i "s/\(min_responses_required = \)[0-9]\+/\1$min_responses/" ../../../job_templates/swarm_cse_tf_model_learner/config_fed_client.conf
+sed -i "s/\(min_responses_required = \)[0-9]\+/\1$num_clients/" ../../../job_templates/swarm_cse_tf_model_learner/config_fed_client.conf
 
 # ./prepare_data.sh "$num_clients" "${weights[@]}"
 python3 prepare_data_from_csv.py "$iteration" "$num_clients" "${weights[@]}"

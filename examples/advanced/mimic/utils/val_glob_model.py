@@ -3,13 +3,18 @@ import argparse
 import sys
 import pandas as pd
 import numpy as np
-from sklearn.metrics import roc_auc_score
 from datetime import datetime
+import random
+import tensorflow as tf
+
+random.seed(42)
+np.random.seed(42)
+tf.random.set_seed(42)
+os.environ['TF_CUDNN_DETERMINISTIC'] = '1'
+os.environ['PYTHONHASHSEED'] = str(42)
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../networks'))
-from mimic_nets import CNN
-
-DEFAULT_ITER = 5
+from mimic_nets import FCN, get_opt, get_metrics
 
 def validate_global_models(data_path, models_path, iteration, num_clients, weights):
     if not np.isclose(sum(weights), 100.0, atol=1e-1):
@@ -33,7 +38,18 @@ def validate_global_models(data_path, models_path, iteration, num_clients, weigh
     if os.path.exists(results_file):
         results_df = pd.read_csv(results_file)
     else:
-        results_df = pd.DataFrame(columns=['datetime', 'user', 'splits', 'auc', 'iteration'])
+        results_df = pd.DataFrame(columns=[
+            'datetime',
+            'user',
+            'splits',
+            'loss',
+            'auc',
+            'auprc',
+            'accuracy',
+            'precision',
+            'recall',
+            'iteration'
+        ])
     
     for j in range(1, num_clients + 1):
         model_path = os.path.join(models_path, f'site-{j}', 'simulate_job', f'app_site-{j}', f'site-{j}.weights.h5')
@@ -43,15 +59,26 @@ def validate_global_models(data_path, models_path, iteration, num_clients, weigh
             continue
             
         try:
-            model = CNN(input_dim=input_dim)
+            model = FCN(input_dim=input_dim)
             model.build((None, input_dim))
             model.load_weights(model_path)
+            model.compile(optimizer=get_opt(), loss='binary_crossentropy', metrics=get_metrics())
             
-            y_pred = model.predict(X_test).flatten()
-            auc = roc_auc_score(y_test, y_pred)
+            metrics = model.evaluate(X_test, y_test, verbose=0, return_dict=True)
             
             weight = weights[j - 1] if weights else 100.0/num_clients
-            new_row = {'datetime': datetime.now(), 'user': j+1 if is_data else j, 'splits': weight, 'auc': auc, 'iteration': iteration}
+            new_row = {
+                'datetime': datetime.now(),
+                'user': j+1 if is_data else j,
+                'splits': weight,
+                'loss': metrics['loss'],
+                'auc': metrics['auc'],
+                'auprc': metrics['auprc'],
+                'accuracy': metrics['accuracy'],
+                'precision': metrics['precision'],
+                'recall': metrics['recall'],
+                'iteration': iteration
+            }
             
             results_df = pd.concat([results_df, pd.DataFrame([new_row])], ignore_index=True)
         except Exception as e:

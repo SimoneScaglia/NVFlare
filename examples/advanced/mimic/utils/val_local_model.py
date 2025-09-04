@@ -5,11 +5,17 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 from datetime import datetime
+import random
+import tensorflow as tf
+
+random.seed(42)
+np.random.seed(42)
+tf.random.set_seed(42)
+os.environ['TF_CUDNN_DETERMINISTIC'] = '1'
+os.environ['PYTHONHASHSEED'] = str(42)
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../networks'))
 from mimic_nets import get_net, get_opt, get_metrics
-
-DEFAULT_ITER = 5
 
 def load_and_preprocess_data(path):
     data = pd.read_csv(path)
@@ -34,7 +40,18 @@ def validate_local_models(data_path, iteration, num_clients, weights):
     if os.path.exists(results_file):
         results_df = pd.read_csv(results_file)
     else:
-        results_df = pd.DataFrame(columns=['datetime', 'user', 'splits', 'auc', 'iteration'])
+        results_df = pd.DataFrame(columns=[
+            'datetime',
+            'user',
+            'splits',
+            'loss',
+            'auc',
+            'auprc',
+            'accuracy',
+            'precision',
+            'recall',
+            'iteration'
+        ])
 
     first_client = 2 if is_data else 1
     for j in range(first_client, num_clients + first_client):
@@ -59,17 +76,22 @@ def validate_local_models(data_path, iteration, num_clients, weights):
             model.fit(X_train, y_train, epochs=25, batch_size=64, verbose=0)
 
             # Predict and evaluate
-            loss, auc = model.evaluate(X_test, y_test, verbose=0)
+            metrics = model.evaluate(X_test, y_test, verbose=0, return_dict=True)
 
             new_row = {
                 'datetime': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 'user': j,
                 'splits': weight,
-                'auc': auc,
+                'loss': metrics['loss'],
+                'auc': metrics['auc'],
+                'auprc': metrics['auprc'],
+                'accuracy': metrics['accuracy'],
+                'precision': metrics['precision'],
+                'recall': metrics['recall'],
                 'iteration': iteration
             }
             results_df = pd.concat([results_df, pd.DataFrame([new_row])], ignore_index=True)
-            print(f"[Client {j}] AUC: {auc:.4f}")
+            print(f"[Client {j}] AUC: {metrics['auc']:.4f}")
 
         except Exception as e:
             print(f"[Client {j}] Error: {str(e)}")
