@@ -3,22 +3,25 @@ import argparse
 import sys
 import pandas as pd
 import numpy as np
-from sklearn.metrics import roc_auc_score
+from datetime import datetime
+import random
+import tensorflow as tf
+
+random.seed(42)
+np.random.seed(42)
+tf.random.set_seed(42)
+os.environ['TF_CUDNN_DETERMINISTIC'] = '1'
+os.environ['PYTHONHASHSEED'] = str(42)
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../networks'))
-from mimic_nets import CNN
+from mimic_nets import FCN, get_opt, get_metrics
 
-DEFAULT_ITER=5
-
-def validate_global_models(data_path, models_path, num_clients, weights):
-    if not np.isclose(sum(weights), 1.0, atol=1e-4): # Se la somma dei pesi non fa 1
-        results_dir = f'/tmp/nvflare/results/1host_{num_clients}nodes_data/swarm_results'
-        os.makedirs(results_dir, exist_ok=True)
-        results_file = os.path.join(results_dir, f'aucs.csv')
-    else:
-        results_dir = f'/tmp/nvflare/results/1host_{num_clients}nodes/swarm_results'
-        os.makedirs(results_dir, exist_ok=True)
-        results_file = os.path.join(results_dir, f'aucs.csv')
+def validate_global_models(data_path, models_path, iteration, num_clients, weights):
+    is_data = False
+    weights = weights[::-1]
+    results_dir = f'/tmp/nvflare/results/1host_{num_clients}nodes/swarm_results'
+    os.makedirs(results_dir, exist_ok=True)
+    results_file = os.path.join(results_dir, f'aucs.csv')
     
     data = pd.read_csv(data_path)
     X_test = data.iloc[:, :-1].values
@@ -29,10 +32,18 @@ def validate_global_models(data_path, models_path, num_clients, weights):
     if os.path.exists(results_file):
         results_df = pd.read_csv(results_file)
     else:
-        results_df = pd.DataFrame(columns=['user', 'split', 'auc', 'iteration'])
-    
-    iteration = int(results_df.iloc[-1]['iteration']) + 1 if not results_df.empty else 0
-    iteration = 0 if iteration == DEFAULT_ITER else iteration
+        results_df = pd.DataFrame(columns=[
+            'datetime',
+            'user',
+            'splits',
+            'loss',
+            'auc',
+            'auprc',
+            'accuracy',
+            'precision',
+            'recall',
+            'iteration'
+        ])
     
     for j in range(1, num_clients + 1):
         model_path = os.path.join(models_path, f'site-{j}', 'simulate_job', f'app_site-{j}', f'site-{j}.weights.h5')
@@ -42,15 +53,26 @@ def validate_global_models(data_path, models_path, num_clients, weights):
             continue
             
         try:
-            model = CNN(input_dim=input_dim)
+            model = FCN(input_dim=input_dim)
             model.build((None, input_dim))
             model.load_weights(model_path)
+            model.compile(optimizer=get_opt(), loss='binary_crossentropy', metrics=get_metrics())
             
-            y_pred = model.predict(X_test).flatten()
-            auc = roc_auc_score(y_test, y_pred)
+            metrics = model.evaluate(X_test, y_test, verbose=0, return_dict=True)
             
-            weight = weights[j - 1] if weights else 1.0/num_clients
-            new_row = {'user': j, 'split': weight, 'auc': auc, 'iteration': iteration}
+            weight = weights[j - 1] if weights else 100.0/num_clients
+            new_row = {
+                'datetime': datetime.now(),
+                'user': j+1 if is_data else j,
+                'splits': weight,
+                'loss': metrics['loss'],
+                'auc': metrics['auc'],
+                'auprc': metrics['auprc'],
+                'accuracy': metrics['accuracy'],
+                'precision': metrics['precision'],
+                'recall': metrics['recall'],
+                'iteration': iteration
+            }
             
             results_df = pd.concat([results_df, pd.DataFrame([new_row])], ignore_index=True)
         except Exception as e:
@@ -64,15 +86,16 @@ def main():
     os.chdir(script_dir)
 
     parser = argparse.ArgumentParser(description="Script per validare il modello globale.")
+    parser.add_argument('iteration', type=int, help="Iterazione.")
     parser.add_argument('num_clients', type=int, help="Numero di client.")
-    parser.add_argument('--weights', type=float, nargs='+', help="Percentuali di dati per ciascun client (devono sommare a 1.0)")
+    parser.add_argument('--weights', type=float, nargs='+', help="Percentuali di dati per ciascun client (devono sommare a 100.0)")
 
     args = parser.parse_args()
 
-    data_path = '../dataset/data_test.csv'
+    data_path = '../dataset/25k_test.csv'
     models_path = f'/tmp/nvflare/mimic_swarm_{args.num_clients}'
 
-    validate_global_models(data_path, models_path, args.num_clients, args.weights)
+    validate_global_models(data_path, models_path, args.iteration, args.num_clients, args.weights)
 
 if __name__ == "__main__":
     main()

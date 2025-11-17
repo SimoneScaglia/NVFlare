@@ -12,16 +12,13 @@ from mimic.networks.mimic_nets import FCN, get_opt, get_metrics
 from sklearn.model_selection import train_test_split
 from nvflare.app_common.app_constant import AppConstants, ModelName
 import random
+import json
 
 random.seed(42)
 np.random.seed(42)
 tf.random.set_seed(42)
 os.environ['TF_CUDNN_DETERMINISTIC'] = '1'
-os.environ['TF_DETERMINISTIC_OPS'] = '1'  # CRITICAL: Ensure deterministic operations
 os.environ['PYTHONHASHSEED'] = str(42)
-
-# CRITICAL: Configure TensorFlow for reproducibility
-tf.config.experimental.enable_op_determinism()
 
 class MimicModelLearner(ModelLearner):
     def __init__(
@@ -118,14 +115,8 @@ class MimicModelLearner(ModelLearner):
             self.train_dataset = (X_train, y_train)
             self.valid_dataset = (X_valid, y_valid)
 
-            self.train_loader = tf.data.Dataset.from_tensor_slices(self.train_dataset).shuffle(buffer_size=len(X_train), seed=42, reshuffle_each_iteration=True).batch(self.batch_size).prefetch(tf.data.AUTOTUNE)
+            self.train_loader = tf.data.Dataset.from_tensor_slices(self.train_dataset).batch(self.batch_size).prefetch(tf.data.AUTOTUNE)
             self.valid_loader = tf.data.Dataset.from_tensor_slices(self.valid_dataset).batch(self.batch_size).prefetch(tf.data.AUTOTUNE)
-            
-            # CRITICAL: Ensure deterministic ordering for reproducible results
-            options = tf.data.Options()
-            options.deterministic = True
-            self.train_loader = self.train_loader.with_options(options)
-            self.valid_loader = self.valid_loader.with_options(options)
 
     def finalize(self):
         """Finalize resources like threads or open files."""
@@ -169,30 +160,52 @@ class MimicModelLearner(ModelLearner):
         self._create_datasets()
 
         # Get round information
-        self.info(f"Current/Total Round: {self.current_round + 1}/{self.total_rounds}")
+        round_num = self.current_round + 1
+        self.info(f"Current/Total Round: {round_num}/{self.total_rounds}")
         self.info(f"Client identity: {self.site_name}")
 
         # Update local model weights with received weights
         global_weights = model.params
-        
-        # CRITICAL: Ensure model is built before setting weights
-        if not self.model.built:
-            # Build model with a dummy input to ensure proper weight initialization
-            dummy_input = tf.zeros((1, 40))  # Assuming input_dim=40 from mimic_nets.py
-            _ = self.model(dummy_input)
-            
         self.model.set_weights(list(global_weights.values()) if isinstance(global_weights, dict) else global_weights)
 
         # Local train steps
         self.local_train(self.train_loader, global_weights, val_freq=1 if self.central else 0)
 
-        # Validate after local train
-        auc = self.local_valid(self.valid_loader)
-        self.info(f"val_auc_local_model: {auc:.4f}")
+        # ===== Validate after local train with all metrics =====
+        metrics_list = get_metrics()
+        for inputs, labels in self.valid_loader:
+            outputs = self.model(inputs, training=False)
 
-        self.save_model(is_best=False)
-        if auc > self.best_auc:
-            self.best_auc = auc
+            if outputs.shape[-1] > 1:
+                probs = tf.nn.softmax(outputs)[:, 1]
+            else:
+                probs = tf.nn.sigmoid(outputs)
+                probs = tf.squeeze(probs, axis=-1)
+
+            labels = tf.cast(tf.reshape(labels, [-1]), tf.float32)
+
+            for m in metrics_list:
+                m.update_state(labels, probs)
+
+        metrics_results = {m.name: float(m.result().numpy()) for m in metrics_list}
+        self.info(f"Validation metrics round {round_num}: {metrics_results}")
+
+        # ===== Save metrics to fixed folder =====
+        metrics_dir = "/tmp/nvflare/results/metrics"
+        os.makedirs(metrics_dir, exist_ok=True)
+        metrics_file = os.path.join(metrics_dir, f"metrics_node{self.site_name}_round{round_num}.json")
+        with open(metrics_file, "w") as f:
+            json.dump(metrics_results, f, indent=4)
+
+        # ===== Save model weights to fixed folder =====
+        weights_dir = "/tmp/nvflare/results/weights"
+        os.makedirs(weights_dir, exist_ok=True)
+        weights_file = os.path.join(weights_dir, f"node{self.site_name}_round{round_num}.weights.h5")
+        self.model.save_weights(weights_file)
+
+        # Update best model if needed
+        if metrics_results["auc"] > self.best_auc:
+            self.best_auc = metrics_results["auc"]
             self.save_model(is_best=True)
 
         # Compute delta model
@@ -212,21 +225,14 @@ class MimicModelLearner(ModelLearner):
         self.model.trainable = False
 
         auc_metric = get_metrics()[0]
-        auc_metric.reset_state()  # CRITICAL: Reset metric state before validation
         for inputs, labels in valid_loader:
             outputs = self.model(inputs)
-            
-            # CRITICAL: Ensure consistent probability calculation
-            # Since the model has sigmoid activation in the last layer (mimic_nets.py line 22)
-            # we should directly use the outputs without additional sigmoid
+
             if outputs.shape[-1] > 1:
-                # Multi-class case (shouldn't happen with current architecture)
-                probs = tf.nn.softmax(outputs)[:, 1]
+                probs = tf.nn.softmax(outputs)[:, 1]  # Per classificazione binaria da softmax
             else:
-                # Binary case: outputs already have sigmoid applied from model
-                probs = tf.squeeze(outputs, axis=-1)
-                # Ensure probabilities are in valid range [0, 1]
-                probs = tf.clip_by_value(probs, 1e-7, 1.0 - 1e-7)
+                probs = tf.nn.sigmoid(outputs)
+                probs = tf.squeeze(probs, axis=-1)
 
             labels = tf.cast(tf.reshape(labels, [-1]), tf.float32)
 
@@ -241,13 +247,6 @@ class MimicModelLearner(ModelLearner):
         self.info(f"Client identity: {self.site_name}")
 
         global_weights = model.params
-        
-        # CRITICAL: Ensure model is built before setting weights
-        if not self.model.built:
-            # Build model with a dummy input to ensure proper weight initialization
-            dummy_input = tf.zeros((1, 40))  # Assuming input_dim=40 from mimic_nets.py
-            _ = self.model(dummy_input)
-            
         self.model.set_weights(list(global_weights.values()) if isinstance(global_weights, dict) else global_weights)
 
         model_owner = self.get_shareable_header(AppConstants.MODEL_OWNER)

@@ -12,6 +12,8 @@ from mimic.networks.mimic_nets import FCN, get_opt, get_metrics
 from sklearn.model_selection import train_test_split
 from nvflare.app_common.app_constant import AppConstants, ModelName
 import random
+import shap
+import matplotlib.pyplot as plt
 
 random.seed(42)
 np.random.seed(42)
@@ -78,6 +80,7 @@ class MimicModelLearner(ModelLearner):
         self.valid_dataset = None
         self.train_loader = None
         self.valid_loader = None
+        self.feature_names = None
 
     def initialize(self):
         """Initialization of model, optimizer, loss function, etc."""
@@ -104,6 +107,9 @@ class MimicModelLearner(ModelLearner):
 
             df = pd.read_csv(csv_file_path)
 
+            # Save feature names for SHAP analysis
+            self.feature_names = df.columns[:-1].tolist()
+
             # Assumiamo che l'ultima colonna sia il target
             X = df.iloc[:, :-1].values
             y = df.iloc[:, -1].values
@@ -126,6 +132,115 @@ class MimicModelLearner(ModelLearner):
             options.deterministic = True
             self.train_loader = self.train_loader.with_options(options)
             self.valid_loader = self.valid_loader.with_options(options)
+
+    def shap_analysis(self, model, x_data, y_data, model_type, iteration):
+        """Esegue l'analisi SHAP per un modello e salva i risultati"""
+        try:
+            # Crea directory per i plot SHAP
+            shap_dir = os.path.join(self.app_root, f"{model_type}_shap_plots")
+            os.makedirs(shap_dir, exist_ok=True)
+            
+            # Usa un campione più piccolo per SHAP per ragioni di performance
+            background_size = min(100, len(x_data))
+            background_indices = np.random.choice(x_data.shape[0], background_size, replace=False)
+            background = x_data[background_indices]
+            
+            explainer = shap.DeepExplainer(model, background)
+            
+            sample_size = min(50, len(x_data))
+            test_indices = np.random.choice(x_data.shape[0], sample_size, replace=False)
+            test_sample = x_data[test_indices]
+            shap_values = explainer.shap_values(test_sample)
+            
+            # DEBUG: Stampa informazioni su shap_values
+            self.info(f"DEBUG: Type of shap_values: {type(shap_values)}")
+            if isinstance(shap_values, list):
+                self.info(f"DEBUG: Length of shap_values list: {len(shap_values)}")
+                for i, val in enumerate(shap_values):
+                    self.info(f"DEBUG: shap_values[{i}] shape: {val.shape if hasattr(val, 'shape') else 'no shape'}")
+            
+            # Gestione più robusta delle SHAP values
+            if isinstance(shap_values, list):
+                if len(shap_values) > 1:
+                    # Modello di classificazione binaria: shap_values[0] = classe 0, shap_values[1] = classe 1
+                    shap_values_pos = shap_values[1]  # Usa la classe positiva (sepsi)
+                else:
+                    # Solo un elemento nella lista, usalo
+                    shap_values_pos = shap_values[0]
+            else:
+                # Non è una lista, usa direttamente
+                shap_values_pos = shap_values
+            
+            # Verifica che shap_values_pos sia un array numpy
+            if not isinstance(shap_values_pos, np.ndarray):
+                self.info(f"DEBUG: Converting shap_values_pos to numpy array. Current type: {type(shap_values_pos)}")
+                shap_values_pos = np.array(shap_values_pos)
+            
+            self.info(f"DEBUG: Final shap_values_pos shape: {shap_values_pos.shape}")
+            
+            # Gestione della dimensionalità
+            if len(shap_values_pos.shape) == 3:
+                # Se è 3D, prendi solo la prima dimensione (per il primo output)
+                shap_values_pos = shap_values_pos[:, :, 0]
+                self.info(f"DEBUG: After 3D->2D conversion, shape: {shap_values_pos.shape}")
+            
+            # 1. Top 20 Features
+            shap_means = np.abs(shap_values_pos).mean(axis=0)
+            if len(shap_means.shape) > 1:
+                shap_means = shap_means.flatten()
+            
+            if len(shap_means) != len(self.feature_names):
+                self.info(f"Avviso: Numero di feature non corrisponde. SHAP: {len(shap_means)}, Feature names: {len(self.feature_names)}")
+                n_features = min(len(shap_means), len(self.feature_names))
+                shap_means = shap_means[:n_features]
+                features_list = self.feature_names[:n_features]
+            else:
+                features_list = self.feature_names
+            
+            feature_importance = pd.DataFrame({
+                'feature': features_list,
+                'shap_importance': shap_means
+            }).sort_values('shap_importance', ascending=False)
+
+            top20_features = feature_importance.head(20)
+            
+            plt.figure(figsize=(20, 8))
+            bars = plt.barh(top20_features['feature'], top20_features['shap_importance'])
+            plt.xlabel('SHAP Importance')
+            plt.title(f'Top 20 Features - {model_type} - Client {self.site_name} - Round {iteration}')
+            plt.gca().invert_yaxis()
+            
+            for bar in bars:
+                width = bar.get_width()
+                plt.text(width, bar.get_y() + bar.get_height()/2, f'{width:.4f}', ha='left', va='center', fontsize=9)
+            
+            plt.tight_layout()
+            
+            # Salva il grafico
+            plot_filename = os.path.join(shap_dir, f'shap_top20_{self.site_name}_round_{iteration}.png')
+            plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            # 2. Summary Plot - solo se abbiamo abbastanza dati
+            try:
+                plt.figure(figsize=(12, 10))
+                shap.summary_plot(shap_values_pos, test_sample, feature_names=features_list, show=False)
+                plt.title(f'SHAP Summary Plot - {model_type} - Client {self.site_name} - Round {iteration}')
+                plt.tight_layout()
+                plt.savefig(os.path.join(shap_dir, f'shap_summary_{self.site_name}_round_{iteration}.png'), dpi=300, bbox_inches='tight')
+                plt.close()
+            except Exception as e:
+                self.info(f"Warning: Could not create summary plot: {e}")
+            
+            # Salva anche i dati delle feature importance in CSV
+            feature_importance.to_csv(os.path.join(shap_dir, f'feature_importance_{self.site_name}_round_{iteration}.csv'), index=False)
+            
+            self.info(f"Complete SHAP analysis saved for {model_type} model - Client {self.site_name} - Round {iteration}")
+            
+        except Exception as e:
+            self.info(f"Error in SHAP analysis for {model_type} model - Client {self.site_name} - Round {iteration}: {str(e)}")
+            import traceback
+            self.info(f"Traceback: {traceback.format_exc()}")
 
     def finalize(self):
         """Finalize resources like threads or open files."""
@@ -263,6 +378,12 @@ class MimicModelLearner(ModelLearner):
         if val_auc > self.best_auc:
             self.best_auc = val_auc
             self.save_model(is_best=True)
+
+        # SHAP Analysis for global model
+        if self.current_round + 1 == self.total_rounds:
+            self.info(f"Performing SHAP analysis for global model at round {self.current_round + 1}")
+            x_valid, y_valid = self.valid_dataset
+            self.shap_analysis(self.model, x_valid, y_valid, "swarm", self.current_round + 1)
 
         return FLModel(metrics={"train_auc": float(train_auc), "val_auc": float(val_auc)})
 
