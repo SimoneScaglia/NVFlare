@@ -24,7 +24,7 @@ def get_net(input_shape):
     ])
 
 def get_opt():
-    return tf.keras.optimizers.Adam(learning_rate=0.001)
+    return tf.keras.optimizers.Adam(learning_rate=0.01)    ### LEARNING RATE
 
 def get_metrics():
     return [

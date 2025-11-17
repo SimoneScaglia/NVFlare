@@ -1,7 +1,7 @@
-DEFAULT_ITER = 15
+DEFAULT_ITER = 10
 
 with open('run_same_size.sh', 'w') as f:
-    for nodes in range(2, 26):
+    for nodes in range(2, 41):
         for iter in range(DEFAULT_ITER):
             value = round(100 / nodes, 2)
             params = " ".join([str(value)] * nodes)

@@ -1,5 +1,7 @@
 #!/bin/bash
 
+echo "===== Script started at: $(date '+%Y-%m-%d %H:%M:%S') ====="
+
 iteration=$1
 num_clients=$2
 shift
@@ -22,6 +24,8 @@ python3 -m json.tool /tmp/nvflare/mimic_swarm_"$num_clients"/server/simulate_job
 
 script_dir="$( dirname -- "$0"; )";
 python3 "${script_dir}"/../mimic/utils/val_glob_model.py "$iteration" "$num_clients" --weights "${weights[@]}"
-python3 "${script_dir}"/../mimic/utils/val_local_model.py "$iteration" "$num_clients" --weights "${weights[@]}"
+# python3 "${script_dir}"/../mimic/utils/25k_val_local_model.py "$iteration" "$num_clients" --weights "${weights[@]}"
 
 rm -r /tmp/nvflare/mimic_swarm_"$num_clients"
+
+echo "===== Script finished at: $(date '+%Y-%m-%d %H:%M:%S') ====="

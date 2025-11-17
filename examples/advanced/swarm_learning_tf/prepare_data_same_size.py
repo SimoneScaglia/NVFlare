@@ -11,7 +11,7 @@ def main():
     num_clients = int(sys.argv[2])
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    source_dir = os.path.join(script_dir, "..", "mimic", "dataset", "mimiciv_same_size")
+    source_dir = os.path.join(script_dir, "..", "mimic", "dataset", "mimiciv_same_size", "40nodes")
     dest_dir = "/tmp/mimic_data"
     os.makedirs(dest_dir, exist_ok=True)
 

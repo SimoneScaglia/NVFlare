@@ -17,17 +17,11 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../networks'))
 from mimic_nets import FCN, get_opt, get_metrics
 
 def validate_global_models(data_path, models_path, iteration, num_clients, weights):
-    if not np.isclose(sum(weights), 100.0, atol=1e-1):
-        is_data = True
-        results_dir = f'/tmp/nvflare/results/1host_{num_clients}nodes_data/swarm_results'
-        os.makedirs(results_dir, exist_ok=True)
-        results_file = os.path.join(results_dir, f'aucs.csv')
-    else:
-        is_data = False
-        weights = weights[::-1]
-        results_dir = f'/tmp/nvflare/results/1host_{num_clients}nodes/swarm_results'
-        os.makedirs(results_dir, exist_ok=True)
-        results_file = os.path.join(results_dir, f'aucs.csv')
+    is_data = False
+    weights = weights[::-1]
+    results_dir = f'/tmp/nvflare/results/1host_{num_clients}nodes/swarm_results'
+    os.makedirs(results_dir, exist_ok=True)
+    results_file = os.path.join(results_dir, f'aucs.csv')
     
     data = pd.read_csv(data_path)
     X_test = data.iloc[:, :-1].values
@@ -98,7 +92,7 @@ def main():
 
     args = parser.parse_args()
 
-    data_path = '../dataset/mimiciii_test.csv'
+    data_path = '../dataset/25k_test.csv'
     models_path = f'/tmp/nvflare/mimic_swarm_{args.num_clients}'
 
     validate_global_models(data_path, models_path, args.iteration, args.num_clients, args.weights)
