@@ -14,6 +14,7 @@
 import fnmatch
 import threading
 import time
+import uuid
 
 from nvflare.apis.event_type import EventType
 from nvflare.apis.executor import Executor
@@ -27,12 +28,9 @@ from nvflare.apis.utils.event import fire_event_to_components
 from nvflare.apis.utils.fl_context_utils import add_job_audit_event
 from nvflare.apis.utils.reliable_message import ReliableMessage
 from nvflare.apis.utils.task_utils import apply_filters
-from nvflare.edge.constants import EdgeEventType
-from nvflare.edge.constants import Status as EdgeStatus
-from nvflare.fuel.f3.cellnet.defs import CellChannel
 from nvflare.fuel.f3.cellnet.fqcn import FQCN
-from nvflare.fuel.f3.cellnet.utils import make_reply as make_cell_reply
-from nvflare.fuel.f3.message import Message as CellMessage
+from nvflare.fuel.f3.streaming.file_downloader import FileDownloader
+from nvflare.fuel.utils.msg_root_utils import delete_msg_root
 from nvflare.private.defs import SpecialTaskName, TaskConstant
 from nvflare.private.fed.client.client_engine_executor_spec import ClientEngineExecutorSpec, TaskAssignment
 from nvflare.private.fed.tbi import TBI
@@ -206,33 +204,7 @@ class ClientRunner(TBI):
             self.fire_event(event, fl_ctx)
 
     def set_cell(self, cell):
-        cell.register_request_cb(
-            channel=CellChannel.EDGE_REQUEST,
-            topic="*",
-            cb=self._receive_edge_request,
-        )
-
-    def _receive_edge_request(self, request: CellMessage):
-        with self.engine.new_context() as fl_ctx:
-            assert isinstance(fl_ctx, FLContext)
-            try:
-                # place the cell message into fl_ctx in case it's needed by process_edge_request.
-                fl_ctx.set_prop(FLContextKey.CELL_MESSAGE, request, private=True, sticky=False)
-                self.engine.fire_event(EdgeEventType.EDGE_REQUEST_RECEIVED, fl_ctx)
-                exception = fl_ctx.get_prop(FLContextKey.EXCEPTIONS)
-                if exception:
-                    return make_cell_reply(EdgeStatus.PROCESS_EXCEPTION)
-
-                reply = fl_ctx.get_prop(FLContextKey.TASK_RESULT)
-                if not reply:
-                    self.logger.debug("no result for edge request")
-                    return make_cell_reply(EdgeStatus.NO_TASK)
-                else:
-                    self.logger.debug("sending back edge result")
-                    return make_cell_reply(EdgeStatus.OK, body=reply)
-            except Exception as ex:
-                self.log_error(fl_ctx, f"exception from receive_edge_request: {secure_format_exception(ex)}")
-                return make_cell_reply(EdgeStatus.PROCESS_EXCEPTION)
+        pass
 
     def find_executor(self, task_name):
         return self.task_router.route(task_name)
@@ -248,6 +220,17 @@ class ClientRunner(TBI):
         return reply
 
     def _process_task(self, task: TaskAssignment, fl_ctx: FLContext) -> Shareable:
+        reply = self._do_process_task(task, fl_ctx)
+
+        cookie_jar = task.data.get_cookie_jar()
+        if cookie_jar:
+            reply.set_cookie_jar(cookie_jar)
+
+        reply.set_header(ReservedHeaderKey.TASK_NAME, task.name)
+        reply.set_header(ReservedHeaderKey.TASK_ID, task.task_id)
+        return reply
+
+    def _do_process_task(self, task: TaskAssignment, fl_ctx: FLContext) -> Shareable:
         if fl_ctx.is_job_unsafe():
             return make_reply(ReturnCode.UNSAFE_JOB)
 
@@ -256,7 +239,7 @@ class ClientRunner(TBI):
 
         abort_signal = Signal(parent=self.run_abort_signal)
         try:
-            reply = self._do_process_task(task, fl_ctx, abort_signal)
+            reply = self._do_task(task, fl_ctx, abort_signal)
         except Exception as ex:
             self.log_exception(fl_ctx, secure_format_exception(ex))
             reply = make_reply(ReturnCode.EXECUTION_EXCEPTION)
@@ -268,14 +251,9 @@ class ClientRunner(TBI):
             self.log_error(fl_ctx, f"task reply must be Shareable, but got {type(reply)}")
             reply = make_reply(ReturnCode.EXECUTION_EXCEPTION)
 
-        cookie_jar = task.data.get_cookie_jar()
-        if cookie_jar:
-            reply.set_cookie_jar(cookie_jar)
-        reply.set_header(ReservedHeaderKey.TASK_NAME, task.name)
-        reply.set_header(ReservedHeaderKey.TASK_ID, task.task_id)
         return reply
 
-    def _do_process_task(self, task: TaskAssignment, fl_ctx: FLContext, abort_signal: Signal) -> Shareable:
+    def _do_task(self, task: TaskAssignment, fl_ctx: FLContext, abort_signal: Signal) -> Shareable:
         if not isinstance(task.data, Shareable):
             self.log_error(fl_ctx, f"got invalid task data in assignment: expect Shareable, but got {type(task.data)}")
             return make_reply(ReturnCode.BAD_TASK_DATA)
@@ -379,6 +357,8 @@ class ClientRunner(TBI):
         self.log_debug(fl_ctx, "firing event EventType.BEFORE_TASK_EXECUTION")
         fl_ctx.set_prop(FLContextKey.TASK_DATA, value=task.data, private=True, sticky=False)
         self.fire_event(EventType.BEFORE_TASK_EXECUTION, fl_ctx)
+        # Task_data is needed in the executor, don't clean it here
+
         try:
             self.log_info(fl_ctx, f"invoking task executor {executor_name}")
             add_job_audit_event(fl_ctx=fl_ctx, msg=f"invoked executor {executor_name}")
@@ -433,6 +413,8 @@ class ClientRunner(TBI):
                 fl_ctx=fl_ctx,
                 msg=f"submit result: {ReturnCode.EXECUTION_EXCEPTION}",
             )
+        finally:
+            fl_ctx.set_prop(FLContextKey.TASK_DATA, value=None, private=True, sticky=False)
 
         fl_ctx.set_prop(FLContextKey.TASK_RESULT, value=reply, private=True, sticky=False)
 
@@ -475,10 +457,8 @@ class ClientRunner(TBI):
                 msg=f"submit result: {ReturnCode.TASK_RESULT_FILTER_ERROR}",
             )
 
-        fl_ctx.set_prop(FLContextKey.TASK_RESULT, value=reply, private=True, sticky=False)
-
         self.log_debug(fl_ctx, "firing event EventType.AFTER_TASK_RESULT_FILTER")
-        self.fire_event(EventType.AFTER_TASK_RESULT_FILTER, fl_ctx)
+        self.fire_event_with_data(EventType.AFTER_TASK_RESULT_FILTER, fl_ctx, FLContextKey.TASK_RESULT, reply)
         self.log_info(fl_ctx, "finished processing task")
 
         if not isinstance(reply, Shareable):
@@ -586,6 +566,9 @@ class ClientRunner(TBI):
 
     def _try_send_result_once(self, result: Shareable, task_id: str, fl_ctx: FLContext):
         # wait until server is ready to receive
+        msg_root_id = str(uuid.uuid4())
+        result.set_header(ReservedHeaderKey.MSG_ROOT_ID, msg_root_id)
+
         while True:
             if self.run_abort_signal.triggered:
                 return _TASK_CHECK_RESULT_TASK_GONE
@@ -604,6 +587,7 @@ class ClientRunner(TBI):
         reply_sent = self.engine.send_task_result(result, fl_ctx, timeout=self.submit_task_result_timeout)
         if reply_sent:
             self.log_info(fl_ctx, f"task result sent to {self.parent_target}")
+            delete_msg_root(msg_root_id)
             return _TASK_CHECK_RESULT_OK
         else:
             self.log_error(fl_ctx, f"failed to send task result to {self.parent_target} - will try again")
@@ -671,6 +655,8 @@ class ClientRunner(TBI):
             self.end_run_events_sequence()
             ReliableMessage.shutdown()
             self.engine.shutdown_streamer()
+            FileDownloader.shutdown()
+
             with self.task_lock:
                 self.running_tasks = {}
 

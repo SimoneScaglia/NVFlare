@@ -24,7 +24,7 @@ Can be run from :github_nvflare_link:`hello_world notebook <examples/hello-world
 1.2. Workflows
 --------------
 
-  * :ref:`Hello FedAvg with NumPy <hello_fedavg_numpy>` - Example using the FedAvg workflow with a NumPy trainer
+  * :ref:`Hello NumPy <hello_numpy>` - Example using the FedAvg workflow with a NumPy trainer
   * :ref:`Hello Cross-Site Validation <hello_cross_val>` - Example using the Cross Site Eval workflow, also demonstrates running cross site validation using the previous training results.
   * :github_nvflare_link:`Hello Cyclic Weight Transfer (GitHub) <examples/hello-world/hello-cyclic>` - Example using the CyclicController workflow to implement `Cyclic Weight Transfer <https://pubmed.ncbi.nlm.nih.gov/29617797/>`_ with TensorFlow as the deep learning training framework
   * :github_nvflare_link:`Swarm Learning <examples/advanced/swarm_learning>` - Example using Swarm Learning and Client-Controlled Cross-site Evaluation workflows.
@@ -51,7 +51,7 @@ Can be run from :github_nvflare_link:`hello_world notebook <examples/hello-world
   * :github_nvflare_link:`sag_model_learner <examples/hello-world/step-by-step/cifar10/sag_model_learner/sag_model_learner.ipynb>` - scatter and gather workflow illustrating how to write client code using the ModelLearner.
   * :github_nvflare_link:`sag_executor <examples/hello-world/step-by-step/cifar10/sag_executor/sag_executor.ipynb>` - scatter and gather workflow demonstrating show to write client-side executors.
   * :github_nvflare_link:`sag_mlflow <examples/hello-world/step-by-step/cifar10/sag_mlflow/sag_mlflow.ipynb>` - MLflow experiment tracking logs with the Client API in scatter & gather workflows.
-  * :github_nvflare_link:`sag_he <examples/hello-world/step-by-step/cifar10/sag_he/sag_he.ipynb>` - homomorphic encyption using Client API and POC -he mode.
+  * :github_nvflare_link:`sag_he <examples/hello-world/step-by-step/cifar10/sag_he/sag_he.ipynb>` - homomorphic encryption using Client API and POC -he mode.
   * :github_nvflare_link:`cse <examples/hello-world/step-by-step/cifar10/cse/cse.ipynb>` - cross-site evaluation using the Client API.
   * :github_nvflare_link:`cyclic <examples/hello-world/step-by-step/cifar10/cyclic/cyclic.ipynb>` - cyclic weight transfer workflow with server-side controller.
   * :github_nvflare_link:`cyclic_ccwf <examples/hello-world/step-by-step/cifar10/cyclic_ccwf/cyclic_ccwf.ipynb>` - client-controlled cyclic weight transfer workflow with client-side controller.

@@ -73,6 +73,7 @@ class ReservedKey(object):
     WORKSPACE_ROOT = "__workspace_root__"
     APP_ROOT = "__app_root__"
     CLIENT_NAME = "__client_name__"
+    CLIENT_TYPE = "__client_type__"
     TASK_NAME = "__task_name__"
     TASK_DATA = "__task_data__"
     TASK_RESULT = "__task_result__"
@@ -125,6 +126,7 @@ class FLContextKey(object):
     EVENT_SCOPE = ReservedKey.EVENT_SCOPE
     EXCEPTIONS = ReservedKey.EXCEPTIONS
     CLIENT_NAME = ReservedKey.CLIENT_NAME
+    CLIENT_TYPE = ReservedKey.CLIENT_TYPE
     WORKSPACE_ROOT = ReservedKey.WORKSPACE_ROOT
     CURRENT_RUN = ReservedKey.RUN_NUM
     APP_ROOT = ReservedKey.APP_ROOT
@@ -214,6 +216,8 @@ class ReservedTopic(object):
     JOB_HEART_BEAT = "__job_heartbeat__"
     TASK_CHECK = "__task_check__"
     APP_METRICS = "__app_metrics__"
+    MSG_ROOT_DELETED = "__msg_root_deleted__"
+    STOP_CELLNET = "__stop_cellnet__"
 
 
 class AdminCommandNames(object):
@@ -224,7 +228,6 @@ class AdminCommandNames(object):
     LIST_JOB = "list_job"
     DOWNLOAD_JOB = "download_job"
     DOWNLOAD_JOB_COMPONENTS = "download_job_components"
-    DOWNLOAD_JOB_FILE = "download_job_file"
     ABORT_JOB = "abort_job"
     DELETE_JOB = "delete_job"
     CLONE_JOB = "clone_job"
@@ -412,6 +415,7 @@ class WorkspaceConstants:
 
     SERVER_STARTUP_CONFIG = "fed_server.json"
     CLIENT_STARTUP_CONFIG = "fed_client.json"
+    ADMIN_STARTUP_CONFIG = "fed_admin.json"
 
     SERVER_APP_CONFIG = JobConstants.SERVER_JOB_CONFIG
     CLIENT_APP_CONFIG = JobConstants.CLIENT_JOB_CONFIG
@@ -545,6 +549,12 @@ class ConfigVarName:
     # CJ: timeout for retrying status notification message from CJ to CP
     NOTIFY_CP_RETRY_TIMEOUT = "notify_cp_retry_timeout"
 
+    # SJ and CJ: per-msg timeout for streaming
+    STREAMING_PER_REQUEST_TIMEOUT = "streaming_per_request_timeout"
+
+    # SJ and CJ: min file size for streaming. If file size is less than this, it will be attached to msg directly.
+    MIN_FILE_SIZE_FOR_STREAMING = "min_file_size_for_streaming"
+
 
 class SystemVarName:
     """
@@ -562,6 +572,7 @@ class SystemVarName:
     RELAY_URL = "RELAY_URL"  # URL to relay that the CP is connected to
     SECURE_MODE = "SECURE_MODE"  # whether the system is running in secure mode
     JOB_CUSTOM_DIR = "JOB_CUSTOM_DIR"  # custom dir of the job
+    JOB_CONFIG_DIR = "JOB_CONFIG_DIR"  # custom dir of the job
     PYTHONPATH = "PYTHONPATH"
 
 

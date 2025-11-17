@@ -15,6 +15,7 @@ import importlib
 import json
 import os
 import pkgutil
+import subprocess
 import sys
 import warnings
 from typing import List, Union
@@ -273,7 +274,7 @@ def register_decomposer_module(decomposer_module):
                 package_name = module_info.name
                 folder = os.path.join(folder_name, package_name.split(".")[-1])
                 fobs.register_folder(folder, package_name)
-    except (ModuleNotFoundError, RuntimeError, ValueError) as e:
+    except (ModuleNotFoundError, RuntimeError, ValueError):
         # logger.warning(f"Could not register decomposers from: {decomposer_module}")
         pass
 
@@ -424,7 +425,7 @@ def extract_participants(participants_list):
             sites = item.get(JobConstants.SITES)
             participants.extend(sites)
         else:
-            raise ValueError(f"Must be tye of str or dict, but got {type(item)}")
+            raise ValueError(f"Must be type of str or dict, but got {type(item)}")
     return participants
 
 
@@ -446,3 +447,13 @@ def get_job_launcher(job_meta: dict, fl_ctx: FLContext) -> JobLauncherSpec:
         raise RuntimeError(f"The job launcher must be JobLauncherSpec but got {type(launcher)}")
 
     return job_launcher[0]
+
+
+def execute_command_directly(args: List[str]) -> str:
+    """Execute a command directly, without using shell"""
+
+    result = subprocess.run(
+        args, capture_output=False, text=True, shell=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+    )
+
+    return result.stdout

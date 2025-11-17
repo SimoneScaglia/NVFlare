@@ -106,7 +106,7 @@ class EdgeModelUpdater(Updater):
                 model_updates[k] = v.to_model_update(fl_ctx)
 
             if model_updates:
-                self.log_info(fl_ctx, f"prepared {len(model_updates)} model updates for parent")
+                self.log_debug(fl_ctx, f"prepared {len(model_updates)} model updates for parent")
 
             report = StateUpdateReport(
                 current_model_version=state.model_version,
@@ -115,7 +115,7 @@ class EdgeModelUpdater(Updater):
                 available_devices=self.available_devices,
             )
 
-            self.log_info(
+            self.log_debug(
                 fl_ctx,
                 f"prepared parent update report: {report.current_model_version=} "
                 f"model_updates={report.model_updates.keys()}"
@@ -142,6 +142,7 @@ class EdgeModelUpdater(Updater):
             # model has changed.
             new_state.model_version = update_reply.model_version
             new_state.model = update_reply.model
+            new_state.converted_models = {}
             num_changes += 1
 
         if update_reply.device_selection_version != new_state.device_selection_version:
@@ -154,15 +155,25 @@ class EdgeModelUpdater(Updater):
             # switch to the new state in one atomic operation
             self.current_state = new_state
 
-        # drop old model versions
+        # drop old aggr versions based on active_model_versions from parent
         with self._update_lock:
-            old_versions = []
+            old_versions = set()
+            # make a set of current active model versions from unique value of device_selection dict
+            active_model_versions = set(new_state.device_selection.values())
             for mv in self.aggr_states.keys():
-                if new_state.model_version - mv > self.max_model_versions:
-                    old_versions.append(mv)
+                # remove the model versions that are
+                # - either not in device_selection values
+                if mv not in active_model_versions:
+                    old_versions.add(mv)
+                # - or too old
+                elif self.max_model_versions and new_state.model_version - mv > self.max_model_versions:
+                    old_versions.add(mv)
 
+            # remove old versions
             for mv in old_versions:
                 self.aggr_states.pop(mv, None)
+                self.log_info(fl_ctx, f"removed aggregator for model version {mv}")
+                self.log_info(fl_ctx, f"current total number of active aggregator versions: {len(self.aggr_states)}")
 
     def _update_one_model(self, mu: ModelUpdate, fl_ctx: FLContext):
         mas = self.aggr_states.get(mu.model_version)
@@ -211,7 +222,7 @@ class EdgeModelUpdater(Updater):
                 device_selection=dev_selection,
             )
 
-            self.log_info(
+            self.log_debug(
                 fl_ctx,
                 f"accepted {len(report.available_devices)} available devices from child "
                 f"total available devices is now {len(self.available_devices)}",

@@ -22,47 +22,67 @@ from nv_attestation_sdk import attestation
 
 from nvflare.app_opt.confidential_computing.cc_authorizer import CCAuthorizer
 
+from .utils import NonceHistory
+
 GPU_NAMESPACE = "x-nv-gpu"
 default_policy = """{
-  "version":"1.0",
+  "version":"4.0",
   "authorization-rules":{
-    "sub":"NVIDIA-GPU-ATTESTATION",
-    "secboot":true,
-    "x-nvidia-gpu-manufacturer":"NVIDIA Corporation",
-    "x-nvidia-attestation-type":"GPU",
-    "x-nvidia-attestation-detailed-result":{
-      "x-nvidia-gpu-driver-rim-schema-validated":true,
-      "x-nvidia-gpu-vbios-rim-cert-validated":true,
-      "x-nvidia-gpu-attestation-report-cert-chain-validated":true,
-      "x-nvidia-gpu-driver-rim-schema-fetched":true,
-      "x-nvidia-gpu-attestation-report-parsed":true,
-      "x-nvidia-gpu-nonce-match":true,
-      "x-nvidia-gpu-vbios-rim-signature-verified":true,
-      "x-nvidia-gpu-driver-rim-signature-verified":true,
-      "x-nvidia-gpu-arch-check":true,
-      "x-nvidia-gpu-measurements-match":true,
-      "x-nvidia-gpu-attestation-report-signature-verified":true,
-      "x-nvidia-gpu-vbios-rim-schema-validated":true,
-      "x-nvidia-gpu-driver-rim-cert-validated":true,
-      "x-nvidia-gpu-vbios-rim-schema-fetched":true,
-      "x-nvidia-gpu-vbios-rim-measurements-available":true
+    "type": "JWT",
+    "overall-claims": {
+      "x-nvidia-overall-att-result": true,
+      "x-nvidia-ver": "3.0"
     },
-    "x-nvidia-gpu-driver-version":"535.104.05",
-    "hwmodel":"GH100 A01 GSP BROM",
-    "measres":"comparison-successful",
-    "x-nvidia-gpu-vbios-version":"96.00.5E.00.02"
+    "detached-claims":{
+      "measres": "success",
+      "x-nvidia-gpu-arch-check": true,
+      "x-nvidia-gpu-attestation-report-parsed": true,
+      "x-nvidia-gpu-attestation-report-nonce-match": true,
+      "x-nvidia-gpu-attestation-report-signature-verified": true,
+      "x-nvidia-gpu-attestation-report-cert-chain":
+      {
+        "x-nvidia-cert-status": "valid",
+        "x-nvidia-cert-ocsp-status": "good"
+      },
+      "x-nvidia-gpu-attestation-report-cert-chain-fwid-match": true,
+      "x-nvidia-gpu-driver-rim-fetched": true,
+      "x-nvidia-gpu-driver-rim-schema-validated": true,
+      "x-nvidia-gpu-driver-rim-signature-verified": true,
+      "x-nvidia-gpu-driver-rim-version-match": true,
+      "x-nvidia-gpu-driver-rim-cert-chain":
+      {
+        "x-nvidia-cert-status": "valid",
+        "x-nvidia-cert-ocsp-status": "good"
+      },
+      "x-nvidia-gpu-driver-rim-measurements-available": true,
+      "x-nvidia-gpu-vbios-rim-fetched": true,
+      "x-nvidia-gpu-vbios-rim-schema-validated": true,
+      "x-nvidia-gpu-vbios-rim-signature-verified": true,
+      "x-nvidia-gpu-vbios-rim-version-match": true,
+      "x-nvidia-gpu-vbios-rim-cert-chain":
+      {
+        "x-nvidia-cert-status": "valid",
+        "x-nvidia-cert-ocsp-status": "good"
+      },
+      "x-nvidia-gpu-vbios-rim-measurements-available": true,
+      "x-nvidia-gpu-vbios-index-no-conflict": true
+    }
   }
 }
 """
 
 
 class GPUAuthorizer(CCAuthorizer):
-    def __init__(self, verifier_url="https://nras.attestation.nvidia.com/v1/attest/gpu", policy_file=None):
+    def __init__(
+        self, verifier_url="https://nras.attestation.nvidia.com/v4/attest/gpu", policy_file=None, max_nonce_history=1000
+    ):
         self._can_generate = True
         self.client = attestation.Attestation()
         self.client.set_name("nvflare_node")
-        nonce = uuid.uuid4().hex + uuid.uuid1().hex
-        self.client.set_nonce(nonce)
+        self.my_nonce_history = NonceHistory(max_nonce_history)
+        self.seen_nonce_history = NonceHistory(max_nonce_history)
+        self.client.set_claims_version("3.0")
+
         if policy_file is None:
             self.remote_att_result_policy = default_policy
         else:
@@ -72,7 +92,11 @@ class GPUAuthorizer(CCAuthorizer):
 
     def generate(self):
         try:
-            self.client.attest()
+            nonce = uuid.uuid4().hex + uuid.uuid1().hex
+            self.client.set_nonce(nonce)
+            self.my_nonce_history.add(nonce)
+            evidence_list = self.client.get_evidence()
+            self.client.attest(evidence_list)
             token = self.client.get_token()
         except BaseException:
             self.can_generate = False
@@ -82,9 +106,21 @@ class GPUAuthorizer(CCAuthorizer):
     def verify(self, eat_token):
         try:
             jwt_token = json.loads(eat_token)[1]
-            claims = jwt.decode(jwt_token.get("REMOTE_GPU_CLAIMS"), options={"verify_signature": False})
+            remote_gpu_claims = jwt_token.get("REMOTE_GPU_CLAIMS")
+            if (
+                isinstance(remote_gpu_claims, list)
+                and len(remote_gpu_claims) > 0
+                and isinstance(remote_gpu_claims[0], list)
+                and len(remote_gpu_claims[0]) > 1
+            ):
+                claims = jwt.decode(remote_gpu_claims[0][1], options={"verify_signature": False})
+            else:
+                self.logger.info("Invalid structure for REMOTE_GPU_CLAIMS")
+                return False
             # With claims, we will retrieve the nonce
             nonce = claims.get("eat_nonce")
+            if not self.seen_nonce_history.add(nonce):
+                return False
             self.client.set_nonce(nonce)
             self.client.set_token(name="nvflare_node", eat_token=eat_token)
             result = self.client.validate_token(self.remote_att_result_policy)

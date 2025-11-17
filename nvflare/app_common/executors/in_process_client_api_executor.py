@@ -60,6 +60,7 @@ class InProcessClientAPIExecutor(Executor):
         train_task_name: str = AppConstants.TASK_TRAIN,
         evaluate_task_name: str = AppConstants.TASK_VALIDATION,
         submit_model_task_name: str = AppConstants.TASK_SUBMIT_MODEL,
+        server_expected_format: str = ExchangeFormat.NUMPY,
     ):
         super(InProcessClientAPIExecutor, self).__init__()
         self._abort = False
@@ -67,6 +68,7 @@ class InProcessClientAPIExecutor(Executor):
         self._result_pull_interval = result_pull_interval
         self._log_pull_interval = log_pull_interval
         self._params_exchange_format = params_exchange_format
+        self._server_expected_format = server_expected_format
         self._params_transfer_type = params_transfer_type
 
         if not task_script_path or not task_script_path.endswith(".py"):
@@ -171,7 +173,7 @@ class InProcessClientAPIExecutor(Executor):
                     self.log_debug(fl_ctx, f"waiting for result, sleep for {self._result_pull_interval} secs")
                     time.sleep(self._result_pull_interval)
 
-        except Exception as e:
+        except Exception:
             self.log_error(fl_ctx, secure_format_traceback())
             self._event_manager.fire_event(TOPIC_ABORT, f"{task_name}' failed: {secure_format_traceback()}")
             return make_reply(ReturnCode.EXECUTION_EXCEPTION)

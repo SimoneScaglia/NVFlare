@@ -32,12 +32,12 @@ class ClientAPILauncherExecutor(LauncherExecutor):
         launch_timeout: Optional[float] = None,
         task_wait_timeout: Optional[float] = None,
         last_result_transfer_timeout: float = 300.0,
-        external_pre_init_timeout: float = 60.0,
-        peer_read_timeout: Optional[float] = 60.0,
+        external_pre_init_timeout: float = 300.0,
+        peer_read_timeout: Optional[float] = 300.0,
         monitor_interval: float = 0.01,
         read_interval: float = 0.5,
         heartbeat_interval: float = 5.0,
-        heartbeat_timeout: float = 60.0,
+        heartbeat_timeout: float = 300.0,
         workers: int = 4,
         train_with_evaluation: bool = False,
         train_task_name: str = AppConstants.TASK_TRAIN,
@@ -48,6 +48,7 @@ class ClientAPILauncherExecutor(LauncherExecutor):
         params_exchange_format: str = ExchangeFormat.NUMPY,
         params_transfer_type: str = TransferType.FULL,
         config_file_name: str = CLIENT_API_CONFIG,
+        server_expected_format: str = ExchangeFormat.NUMPY,
     ) -> None:
         """Initializes the ClientAPILauncherExecutor.
 
@@ -73,7 +74,8 @@ class ClientAPILauncherExecutor(LauncherExecutor):
                 This ParamsConverter will be called when model is sent from nvflare controller side to executor side.
             to_nvflare_converter_id (Optional[str]): Identifier used to get the ParamsConverter from NVFlare components.
                 This ParamsConverter will be called when model is sent from nvflare executor side to controller side.
-            params_exchange_format (str): What format to exchange the parameters.
+            server_expected_format (str): What format to exchange the parameters between server and client.
+            params_exchange_format (str): What format to exchange the parameters between client and script.
             params_transfer_type (str): How to transfer the parameters. FULL means the whole model parameters are sent.
                 DIFF means that only the difference is sent.
             config_file_name (str): The config file name to write attributes into, the client api will read in this file.
@@ -100,6 +102,7 @@ class ClientAPILauncherExecutor(LauncherExecutor):
             to_nvflare_converter_id=to_nvflare_converter_id,
         )
 
+        self._server_expected_format = server_expected_format
         self._params_exchange_format = params_exchange_format
         self._params_transfer_type = params_transfer_type
         self._config_file_name = config_file_name

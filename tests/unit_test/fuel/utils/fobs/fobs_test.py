@@ -48,7 +48,7 @@ class TestFobs:
         assert data["set"] == TestFobs.SET
 
     def test_unsupported_classes(self):
-        with pytest.raises(TypeError):
+        with pytest.raises(Exception):
             # Queue contains collections.deque, which has no __dict__, can't be handled as Data Class
             unsupported_class = queue.Queue()
             try:
@@ -68,10 +68,13 @@ class TestFobs:
         test_class = ExampleClass(TestFobs.NUMBER)
         fobs.register(ExampleClassDecomposer)
         buf = fobs.dumps(test_class)
-        # Clear registration before deserializing
+        # Unregister the decomposer
         fobs.reset()
-        new_class = fobs.loads(buf)
-        assert new_class.number == TestFobs.NUMBER
+
+        # ExampleClassDecomposer is not builtin, not allowed
+        with pytest.raises(ValueError):
+            new_class = fobs.loads(buf)
+            assert new_class.number == TestFobs.NUMBER
 
     def test_auto_registration(self):
         fobs.reset()

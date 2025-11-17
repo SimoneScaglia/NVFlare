@@ -10,7 +10,10 @@ NVIDIA FLARE
    fl_introduction
    flare_overview
    whats_new
-   Getting Started <quickstart>
+   release_notes/previous_release
+   Installation <installation>
+   getting_started
+   Quick Start <quickstart>
 
 .. toctree::
    :maxdepth: -1
@@ -18,10 +21,12 @@ NVIDIA FLARE
    :caption: Guides
 
    example_applications_algorithms
-   real_world_fl
+   tutorials
    user_guide
    programming_guide
    best_practices
+   edge_development/index
+   confidential_computing/index
 
 .. toctree::
    :maxdepth: -1
@@ -48,18 +53,29 @@ and simulation to real-world production deployment.  Some of the key components 
  - **Management tools** for secure provisioning and deployment, orchestration, and management
  - **Specification-based API** for extensibility
 
+FLARE consists three main product categories:
+
+    - **FLARE Core**: All major FLARE's main components and Infrastructures
+    - **FLARE Confidential AI**: Confidential Federated AI with FLARE and confidential computing
+    - **FLARE Edge**: FLARE edge development
+
+
 Learn more about FLARE features in the :ref:`FLARE Overview <flare_overview>` and :ref:`What's New <whats_new>`.
 
 Getting Started
 ===============
+To get started with NVIDIA FLARE:
+
+1. Follow the :ref:`installation` guide to set up your environment
+2. Run through the :ref:`quickstart` guide to try your first example
+3. Explore more examples in the :ref:`Example Applications <example_applications>` section
+
 For first-time users and FL researchers, FLARE provides the :ref:`FL Simulator <fl_simulator>` that allows you to build, test, and deploy applications locally.
-The :ref:`Getting Started <getting_started>` guide covers installation and walks through an example application using the FL Simulator.
-Additional examples can be found at the :ref:`Examples Applications <example_applications>`, which showcase different federated learning workflows and algorithms on various machine learning and deep learning tasks.
 
 FLARE for Users
 ===============
 If you want to learn how to interact with the FLARE system, please refer to the :ref:`User Guide <user_guide>`.
-When you are ready for a secure, distributed deployment, the :ref:`Real World Federated Learning <real_world_fl>` section covers the tools and processes required to deploy and operate a secure, real-world FLARE project.
+When you are ready for a secure, distributed deployment, the :ref:`Real World Federated Learning <deployment_overview>` section covers the tools and processes required to deploy and operate a secure, real-world FLARE project.
 
 FLARE for Developers
 ====================

@@ -1,5 +1,5 @@
-nvflare~=2.5.0
-openmined.psi==1.1.1
+kagglehub
+openmined-psi>=2.0.5
 pandas
 torch
 scikit-learn

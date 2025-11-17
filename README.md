@@ -10,6 +10,7 @@
 [![pypi](https://badge.fury.io/py/nvflare.svg)](https://badge.fury.io/py/nvflare)
 [![pyversion](https://img.shields.io/pypi/pyversions/nvflare.svg)](https://badge.fury.io/py/nvflare)
 [![downloads](https://static.pepy.tech/badge/nvflare)](https://pepy.tech/project/nvflare)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/NVIDIA/NVFlare)
 
 [NVIDIA FLARE](https://nvidia.github.io/NVFlare/) (**NV**IDIA **F**ederated **L**earning **A**pplication **R**untime **E**nvironment)
 is a domain-agnostic, open-source, extensible Python SDK that allows researchers and data scientists to adapt existing ML/DL workflows to a federated paradigm.
@@ -41,29 +42,24 @@ From Simulation to Real-World
 ## Installation
 To install the [current release](https://pypi.org/project/nvflare/):
 ```
-$ python3 -m pip install nvflare
+$ python -m pip install nvflare
 ```
+
+For detailed installation please refer to [NVIDIA FLARE installation](https://nvflare.readthedocs.io/en/main/installation.html).
+
 ## Getting Started
 
-* To get started, visit our NVFLARE [website](https://nvidia.github.io/NVFlare/), which includes:
-  * Comprehensive documentation, technical blogs, tutorials, and videos
-  * Slides and recordings of real-world federated learning use cases from past NVFLARE Day Events. 
-  * Tools, API guides, CLI tutorials, training materials, and extensive examples
-* For hands-on learning, try our [step-by-step walkthroughs](https://github.com/NVIDIA/NVFlare/tree/2.6/examples/hello-world/step-by-step) using consistent datasets.
-* Learn how to adapt your centralized training code with our guide on [converting to federated learning](https://github.com/NVIDIA/NVFlare/tree/2.6/examples/hello-world/ml-to-fl).
+* To get started, refer to [getting started](https://nvflare.readthedocs.io/en/main/getting_started.html) documentation
 
 * Structured, self-paced learning is available through curated tutorials and training paths on the website.
   * DLI courses:
     * https://learn.nvidia.com/courses/course-detail?course_id=course-v1:DLI+S-FX-28+V1
     * https://learn.nvidia.com/courses/course-detail?course_id=course-v1:DLI+S-FX-29+V1
-  * follow the notebooks: https://github.com/NVIDIA/NVFlare/tree/main/examples/tutorials/self-paced-training
- 
-* If you'd like to write your own NVIDIA FLARE components, a detailed programming guide can be found [here](https://nvflare.readthedocs.io/en/main/programming_guide.html).
 * visit developer portal https://developer.nvidia.com/flare
 
 ## Community
 
-We welcome community contributions! Please refer to the [contributing guidelines](https://github.com/NVIDIA/NVFlare/blob/main/CONTRIBUTING.md) for more details.
+We welcome community contributions! Please refer to the [contributing guidelines](./CONTRIBUTING.md) for more details.
 
 Ask and answer questions, share ideas, and engage with other community members at [NVFlare Discussions](https://github.com/NVIDIA/NVFlare/discussions).
 
@@ -74,4 +70,4 @@ Take a look at our growing list of [talks and publications](https://nvflare.read
 
 ## License
 
-NVIDIA FLARE is released under an [Apache 2.0 license](https://github.com/NVIDIA/NVFlare/blob/main/LICENSE).
+NVIDIA FLARE is released under an [Apache 2.0 license](./LICENSE).

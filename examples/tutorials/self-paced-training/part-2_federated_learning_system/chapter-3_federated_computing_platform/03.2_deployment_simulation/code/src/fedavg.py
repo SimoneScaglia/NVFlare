@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import os
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Optional
 
 import torch
 
@@ -34,24 +34,23 @@ class FedAvg(BaseFedAvg):
             string literal in the format of "<key> <op> <value>" (e.g. "accuracy >= 80")
         save_filename (str, optional): filename for saving model
         initial_model (nn.Module, optional): initial PyTorch model
+        start_round (int, optional): The starting round number.
     """
 
     def __init__(
         self,
-        *args,
         stop_cond: str,
         num_rounds: int,
         save_filename: str = "FL_global_model.pt",
         initial_model=None,
-        **kwargs,
+        num_clients: int = 3,
+        start_round: int = 0,
     ):
-        super().__init__(*args, **kwargs)
+        super().__init__(num_clients=num_clients, num_rounds=num_rounds, start_round=start_round)
 
         self.stop_cond = stop_cond
-        self.num_rounds = num_rounds
-
         if stop_cond:
-            self.stop_condition = parse_compare_criteria(stop_cond)
+            self.stop_condition = parse_compare_criteria(self.stop_cond)
         else:
             self.stop_condition = None
         self.save_filename = save_filename
@@ -80,7 +79,7 @@ class FedAvg(BaseFedAvg):
 
             clients = self.sample_clients(self.num_clients)
 
-            results: List[FLModel] = self.send_model_and_wait(targets=clients, data=model)
+            results: list[FLModel] = self.send_model_and_wait(targets=clients, data=model)
             aggregate_results = self.aggregate(
                 results, aggregate_fn=self.aggregate_fn
             )  # using default aggregate_fn with `WeightedAggregationHelper`. Can overwrite self.aggregate_fn with signature Callable[List[FLModel], FLModel]
@@ -101,7 +100,7 @@ class FedAvg(BaseFedAvg):
 
         self.info("Finished FedAvg.")
 
-    def should_stop(self, metrics: Optional[Dict] = None, stop_condition: Optional[str] = None):
+    def should_stop(self, metrics: Optional[dict] = None, stop_condition: Optional[str] = None):
         if stop_condition is None or metrics is None:
             return False
 

@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List, Tuple
 
 from flwr.common import Context, Metrics, ndarrays_to_parameters
 from flwr.server import ServerApp, ServerAppComponents, ServerConfig
@@ -21,7 +20,7 @@ from .task import Net, get_weights
 
 
 # Define metric aggregation function
-def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
+def weighted_average(metrics: list[tuple[int, Metrics]]) -> Metrics:
     examples = [num_examples for num_examples, _ in metrics]
 
     # Multiply accuracy of each client by number of examples used
@@ -53,16 +52,16 @@ strategy = FedAvg(
     initial_parameters=parameters,
 )
 
-# Define config
-config = ServerConfig(num_rounds=3)
-
 
 # Flower ServerApp
 def server_fn(context: Context):
-    return ServerAppComponents(
-        strategy=strategy,
-        config=config,
-    )
+    # Read from config
+    num_rounds = context.run_config["num-server-rounds"]
+
+    # Define config
+    config = ServerConfig(num_rounds=num_rounds)
+    return ServerAppComponents(strategy=strategy, config=config)
 
 
+# Create ServerApp
 app = ServerApp(server_fn=server_fn)

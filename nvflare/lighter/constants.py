@@ -64,6 +64,12 @@ class PropKey:
     CAPACITY = "capacity"
     NUM_GPUS = "num_of_gpus"
     GPU_MEM = "mem_per_gpu_in_GiB"
+    EDGE_SERVICE_PORT = "edge_service_port"
+    CC_CONFIG = "cc_config"
+    CC_CONFIG_DICT = "cc_config_dict"
+    CC_ENABLED = "cc_enabled"
+    USE_AIO = "use_aio"
+    CC_ISSUERS = "cc_issuers"
 
     # the following are internal properties added by builders during provision
     PARENT = "parent"
@@ -71,6 +77,7 @@ class PropKey:
     FQSN = "__fqsn__"
     IS_LEAF = "__is_leaf__"
     COMM_CONFIG_ARGS = "__comm_config_args__"
+    AUTHZ_SECTION_KEY = "__authz_section_key__"
 
 
 class CtxKey(WorkDir, PropKey):
@@ -79,6 +86,7 @@ class CtxKey(WorkDir, PropKey):
     TEMP_FILES_LOADED = "__temp_files_loaded__"
     PROVISION_MODE = "__provision_model__"
     LOGGER = "__logger__"
+    BUILD_ERROR = "__build_error__"
     LAST_PROD_STAGE = "last_prod_stage"
     SERVER_NAME = "server_name"
     ROOT_CERT = "root_cert"
@@ -124,8 +132,6 @@ class TemplateSectionKey:
     DOCKER_CLIENT_SH = "docker_cln_sh"
     DOCKER_LAUNCHER_CLIENT_SH = "docker_launcher_cln_sh"
     DOCKER_ADMIN_SH = "docker_adm_sh"
-    GUNICORN_CONF_PY = "gunicorn_conf_py"
-    START_OVERSEER_SH = "start_ovsr_sh"
     FED_SERVER = "fed_server"
     FED_CLIENT = "fed_client"
     SUB_START_SH = "sub_start_sh"
@@ -136,11 +142,13 @@ class TemplateSectionKey:
     LOCAL_CLIENT_RESOURCES = "local_client_resources"
     SAMPLE_PRIVACY = "sample_privacy"
     DEFAULT_AUTHZ = "default_authz"
+    CC_AUTHZ = "cc_authz"
     SERVER_README = "readme_fs"
     CLIENT_README = "readme_fc"
     ADMIN_README = "readme_am"
     FL_ADMIN_SH = "fl_admin_sh"
     FED_ADMIN = "fed_admin"
+    DEFAULT_ADMIN_RESOURCES = "default_admin_resources"
     COMPOSE_YAML = "compose_yaml"
     DOCKERFILE = "dockerfile"
     LAUNCHER_DOCKERFILE = "launcher_dockerfile"
@@ -157,6 +165,7 @@ class TemplateSectionKey:
     AZURE_START_COMMON_SH = "azure_start_common_sh"
     AZURE_START_CLN_HEADER_SH = "azure_start_cln_header_sh"
     AWS_START_SH = "aws_start_sh"
+    EDGE_LCP_RESOURCES = "edge_lcp_resources"
 
 
 class ProvFileName:
@@ -166,7 +175,6 @@ class ProvFileName:
     DOCKER_BUILD_SH = "docker_build.sh"
     DOCKER_SH = "docker.sh"
     DOCKER_LAUNCHER_SH = "docker_launcher.sh"
-    GUNICORN_CONF_PY = "gunicorn.conf.py"
     FED_SERVER_JSON = "fed_server.json"
     FED_CLIENT_JSON = "fed_client.json"
     STOP_FL_SH = "stop_fl.sh"
@@ -199,12 +207,13 @@ class ProvFileName:
     FED_RELAY_JSON = "fed_relay.json"
     AZURE_START_SH = "azure_start.sh"
     AWS_START_SH = "aws_start.sh"
+    EDGE_RESOURCES_JSON = "edge__p_resources.json"
+    START_ALL_SH = "start_all.sh"
 
 
 class CertFileBasename:
     CLIENT = "client"
     SERVER = "server"
-    OVERSEER = "overseer"
 
 
 class CommConfigArg:

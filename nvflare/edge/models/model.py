@@ -17,10 +17,47 @@ import torch.nn as nn
 from executorch.exir import to_edge
 from torch.export import export
 from torch.export.experimental import _export_forward_backward
-from torch.nn import functional as F
 
 
-def export_model(net, input_tensor_example, label_tensor_example):
+def export_model_to_bytes(net: nn.Module, input_shape, output_shape):
+    """Exports a PyTorch model to ExecuTorch PTE format to be used in embedded or edge environments.
+
+    This function creates dummy input and label tensors based on the provided shapes,
+    runs the model export pipeline (including lowering to Executorch), and returns
+    the serialized model buffer.
+
+    Args:
+        net (nn.Module): The PyTorch model to export.
+        input_shape (tuple): The shape of the input tensor, e.g., (batch_size, channels, height, width).
+        output_shape (tuple): The shape of the output tensor, e.g., (batch_size, num_classes).
+
+    Returns:
+        The exported model (.pte) in bytes.
+    """
+
+    input_tensor = torch.randn(input_shape)
+    label_tensor = torch.ones(output_shape, dtype=torch.int64)
+    model_buffer = export_model(net, input_tensor, label_tensor).buffer
+    return model_buffer
+
+
+def export_model(net: nn.Module, input_tensor_example, label_tensor_example):
+    """Runs the full export pipeline to convert a PyTorch model into an Executorch-compatible format.
+
+    This includes:
+      - Capturing the forward graph
+      - Capturing backward graph for training (if applicable)
+      - Lowering to Edge dialect
+      - Lowering to Executorch format
+
+    Args:
+        net (nn.Module): The PyTorch model to export.
+        input_tensor_example (torch.Tensor): An example input tensor for tracing.
+        label_tensor_example (torch.Tensor): An example output/label tensor for training export.
+
+    Returns:
+        ExportedProgram: The final lowered and exported Executorch model.
+    """
     # Captures the forward graph. The graph will look similar to the model definition now.
     # Will move to export_for_training soon which is the api planned to be supported in the long term.
     ep = export(net, (input_tensor_example, label_tensor_example), strict=True)
@@ -33,44 +70,11 @@ def export_model(net, input_tensor_example, label_tensor_example):
     return ep
 
 
-class Cifar10ConvNet(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.conv1 = nn.Conv2d(in_channels=3, out_channels=6, kernel_size=5, stride=2)
-        # self.pool = nn.MaxPool2d(2, 2)
-        self.conv2 = nn.Conv2d(in_channels=6, out_channels=16, kernel_size=5, stride=2)
-        self.fc1 = nn.Linear(in_features=16 * 5 * 5, out_features=120)
-        self.fc2 = nn.Linear(in_features=120, out_features=84)
-        self.fc3 = nn.Linear(in_features=84, out_features=10)
-
-    def forward(self, x):
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = torch.flatten(x, 1)  # flatten all dimensions except batch
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = self.fc3(x)
-        return x
-
-
-class XorNet(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.linear1 = nn.Linear(2, 4)
-        self.sigmoid_1 = nn.Sigmoid()
-        self.linear2 = nn.Linear(4, 2)
-
-    def forward(self, x):
-        x = self.linear1(x)
-        x = self.sigmoid_1(x)
-        x = self.linear2(x)
-        return x
-
-
 # On device training requires the loss to be embedded in the model (and be the first output).
-# We wrap the original model here and add the loss calculation. This will be the model we export.
-class TrainingNet(nn.Module):
-    def __init__(self, net):
+class DeviceModel(nn.Module):
+    """Model wrapper for classification with CrossEntropyLoss."""
+
+    def __init__(self, net: nn.Module):
         super().__init__()
         self.net = net
         self.loss = nn.CrossEntropyLoss()

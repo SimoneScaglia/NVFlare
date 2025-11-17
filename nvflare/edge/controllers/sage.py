@@ -97,6 +97,7 @@ class ScatterAndGatherForEdge(Controller):
         self._num_children = 0
         self._children = None
         self._end_task_topic = message_topic_for_task_end(self.task_name)
+        self._wf_done = False
 
     @classmethod
     def get_next_task_seq(cls):
@@ -159,8 +160,7 @@ class ScatterAndGatherForEdge(Controller):
                 task_data.set_header(EdgeTaskHeaderKey.UPDATE_INTERVAL, self._update_interval)
                 task_data.add_cookie(AppConstants.CONTRIBUTION_ROUND, self._current_round)
 
-                fl_ctx.set_prop(FLContextKey.TASK_DATA, task_data, private=True, sticky=False)
-                self.fire_event(AppEventType.ROUND_STARTED, fl_ctx)
+                self.fire_event_with_data(AppEventType.ROUND_STARTED, fl_ctx, FLContextKey.TASK_DATA, task_data)
 
                 task = Task(
                     name=self.task_name,
@@ -210,6 +210,7 @@ class ScatterAndGatherForEdge(Controller):
                 self.log_info(fl_ctx, f"Round {self._current_round} finished in {time.time() - round_start} seconds")
                 gc.collect()
 
+            self._wf_done = True
             self._current_task_seq = 0
             self.log_info(fl_ctx, f"Finished {self._name}")
 
@@ -278,8 +279,9 @@ class ScatterAndGatherForEdge(Controller):
                 )
 
     def _prepare_train_task_data(self, client_task: ClientTask, fl_ctx: FLContext) -> None:
-        fl_ctx.set_prop(AppConstants.TRAIN_SHAREABLE, client_task.task.data, private=True, sticky=False)
-        self.fire_event(AppEventType.BEFORE_TRAIN_TASK, fl_ctx)
+        self.fire_event_with_data(
+            AppEventType.BEFORE_TRAIN_TASK, fl_ctx, AppConstants.TRAIN_SHAREABLE, client_task.task.data
+        )
 
     def _process_train_result(self, client_task: ClientTask, fl_ctx: FLContext) -> None:
         result = client_task.result
@@ -306,7 +308,8 @@ class ScatterAndGatherForEdge(Controller):
     def process_result_of_unknown_task(
         self, client: Client, task_name, client_task_id, result: Shareable, fl_ctx: FLContext
     ) -> None:
-        self.log_error(fl_ctx, f"Ignoring result from {client.name} for unknown task '{task_name}' {client_task_id}")
+        if not self._wf_done:
+            self.log_warning(fl_ctx, f"Ignoring late result from {client.name} for task '{task_name}' {client_task_id}")
 
     def _process_update_report(self, topic: str, request: Shareable, fl_ctx: FLContext) -> Shareable:
         accepted, reply = process_update_from_child(

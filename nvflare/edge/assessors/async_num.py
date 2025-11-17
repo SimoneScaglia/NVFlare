@@ -41,23 +41,27 @@ class AsyncNumAssessor(Assessor):
 
     def __init__(
         self,
-        num_updates_for_model=10,
-        max_model_versions=3,
-        device_selection_size=20,
-        train_time=60.0,
+        num_updates_for_model,
+        max_model_version,
+        max_model_history,
+        device_selection_size,
+        min_hole_to_fill=1,
+        device_reuse=True,
     ):
         Assessor.__init__(self)
         self.current_model_version = 0
         self.current_model = None
         self.current_selection_version = 0
-        self.train_time = train_time
         self.current_selection = {}
         self.updates = {}  # model_version => _ModelState
         self.available_devices = {}
         self.used_devices = {}
         self.num_updates_for_model = num_updates_for_model
-        self.max_model_versions = max_model_versions
+        self.max_model_version = max_model_version
+        self.max_model_history = max_model_history
         self.device_selection_size = device_selection_size
+        self.min_hole_to_fill = min_hole_to_fill
+        self.device_reuse = device_reuse
         self.update_lock = threading.Lock()
         self.start_time = None
 
@@ -85,7 +89,7 @@ class AsyncNumAssessor(Assessor):
             aggr_info[v] = {"weight": weight, "value": aggr.value, "count": aggr.count, "score": score}
             total += weight * score
 
-            if self.current_model_version - v >= self.max_model_versions:
+            if self.current_model_version - v >= self.max_model_history:
                 old_model_versions.append(v)
 
         # create the ModelState for the new model version
@@ -109,7 +113,7 @@ class AsyncNumAssessor(Assessor):
         report = StateUpdateReport.from_shareable(update)
         if report.available_devices:
             self.available_devices.update(report.available_devices)
-            self.log_info(
+            self.log_debug(
                 fl_ctx,
                 f"assessor got reported {len(report.available_devices)} available devices from child. "
                 f"total num available devices: {len(self.available_devices)}",
@@ -126,7 +130,7 @@ class AsyncNumAssessor(Assessor):
                     self.log_error(fl_ctx, f"bad child update version {model_version}: no update data")
                     continue
 
-                if self.current_model_version - model_version > self.max_model_versions:
+                if self.current_model_version - model_version > self.max_model_history:
                     # this version is too old
                     self.log_info(
                         fl_ctx,
@@ -145,11 +149,17 @@ class AsyncNumAssessor(Assessor):
                     f"processed child update V{model_version} with {len(model_update.devices)} devices: {accepted=}",
                 )
 
-                # remove reported devices from selection
+                # remove reported devices from selection, and from used devices if device_reuse is enabled
+                # indicating that the reported devices becomes available again for reuse
                 for k in model_update.devices.keys():
                     if k not in self.current_selection:
-                        self.log_error(fl_ctx, f"got update from device {k} but it's not in device selection")
+                        self.log_error(
+                            fl_ctx,
+                            f"got update from device {k} but it's not in device selection",
+                        )
                     self.current_selection.pop(k, None)
+                    if self.device_reuse:
+                        self.used_devices.pop(k, None)
 
             current_model_state = self.updates.get(self.current_model_version)
             if not isinstance(current_model_state, _ModelState):
@@ -166,9 +176,11 @@ class AsyncNumAssessor(Assessor):
                     self._generate_new_model(fl_ctx)
 
             # recompute selection
-            self._fill_selection(fl_ctx)
+            num_holes = self.device_selection_size - len(self.current_selection)
+            if num_holes >= self.min_hole_to_fill:
+                self._fill_selection(fl_ctx)
         else:
-            self.log_info(fl_ctx, "no model updates")
+            self.log_debug(fl_ctx, "no model updates")
 
         # reply
         if self.current_model_version == 0:
@@ -195,25 +207,36 @@ class AsyncNumAssessor(Assessor):
         self.log_info(fl_ctx, f"filling {num_holes} holes in selection list")
         if num_holes > 0:
             self.current_selection_version += 1
+            # remove all used devices from available devices
             usable_devices = set(self.available_devices.keys()) - set(self.used_devices.keys())
             if usable_devices:
                 for _ in range(num_holes):
                     device_id = random.choice(list(usable_devices))
                     usable_devices.remove(device_id)
-                    self.current_selection[device_id] = self.current_selection_version
-                    self.used_devices[device_id] = self.current_selection_version
+                    self.current_selection[device_id] = self.current_model_version
+                    self.used_devices[device_id] = {
+                        "model_version": self.current_model_version,
+                        "selection_version": self.current_selection_version,
+                    }
                     if not usable_devices:
                         break
-        self.log_info(fl_ctx, f"current selection: V{self.current_selection_version}; {self.current_selection}")
+        self.log_info(
+            fl_ctx,
+            f"current selection with {len(self.current_selection)} items: V{self.current_selection_version}; {dict(sorted(self.current_selection.items()))}",
+        )
+        if len(self.current_selection) < self.device_selection_size:
+            self.log_warning(
+                fl_ctx,
+                f"current selection has only {len(self.current_selection)} devices, which is less than the expected {self.device_selection_size} devices. Please check the configuration to make sure this is expected.",
+            )
 
     def assess(self, fl_ctx: FLContext) -> Assessment:
-        duration = time.time() - self.start_time
-        if duration > self.train_time:
+        if self.current_model_version >= self.max_model_version:
             model_version = self.current_model_version
             selection_version = self.current_selection_version
             self.log_info(
                 fl_ctx,
-                f"training finished in {duration} secs: {model_version=} {selection_version=} "
+                f"Max model version {self.max_model_version} reached: {model_version=} {selection_version=} "
                 f"num of devices used: {len(self.used_devices)}",
             )
             return Assessment.WORKFLOW_DONE

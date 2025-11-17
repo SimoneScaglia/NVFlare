@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""FL Server / Client startup configer."""
+"""FL Server / Client startup configure."""
 
 import os
 import re
@@ -41,7 +41,7 @@ FL_MODULES = ["server", "client", "app_common", "private"]
 
 
 class FLServerStarterConfiger(JsonConfigurator):
-    """FL Server startup configer."""
+    """FL Server startup configure."""
 
     def __init__(self, workspace: Workspace, args, kv_list=None):
         """Init the FLServerStarterConfiger.
@@ -202,7 +202,7 @@ class FLServerStarterConfiger(JsonConfigurator):
 
 
 class FLClientStarterConfiger(JsonConfigurator):
-    """FL Client startup configer."""
+    """FL Client startup configure."""
 
     def __init__(self, workspace: Workspace, args, kv_list=None):
         """Init the FLClientStarterConfiger.
@@ -418,72 +418,6 @@ class FLClientStarterConfiger(JsonConfigurator):
             parsed_args=self.args,
             var_dict=self.cmd_vars,
         )
-
-
-class FLAdminClientStarterConfigurator(JsonConfigurator):
-    """FL Admin Client startup configurator."""
-
-    def __init__(self, workspace: Workspace):
-        """Uses the json configuration to start the FL admin client.
-
-        Args:
-            workspace: the workspace object
-        """
-        base_pkgs = FL_PACKAGES
-        module_names = FL_MODULES
-
-        admin_config_file_path = workspace.get_admin_startup_file_path()
-
-        JsonConfigurator.__init__(
-            self,
-            config_file_name=admin_config_file_path,
-            base_pkgs=base_pkgs,
-            module_names=module_names,
-            exclude_libs=True,
-        )
-
-        self.workspace = workspace
-        self.admin_config_file_path = admin_config_file_path
-        self.base_deployer = None
-        self.overseer_agent = None
-
-    def process_config_element(self, config_ctx: ConfigContext, node: Node):
-        """Process config element.
-
-        Args:
-            config_ctx: config context
-            node: element node
-        """
-        element = node.element
-        path = node.path()
-
-        if path == "admin.overseer_agent":
-            self.overseer_agent = self.build_component(element)
-            return
-
-    def start_config(self, config_ctx: ConfigContext):
-        """Start the config process.
-
-        Args:
-            config_ctx: config context
-        """
-        super().start_config(config_ctx)
-
-        try:
-            admin = self.config_data["admin"]
-            if admin.get("client_key"):
-                admin["client_key"] = self.workspace.get_file_path_in_startup(admin["client_key"])
-            if admin.get("client_cert"):
-                admin["client_cert"] = self.workspace.get_file_path_in_startup(admin["client_cert"])
-            if admin.get("ca_cert"):
-                admin["ca_cert"] = self.workspace.get_file_path_in_startup(admin["ca_cert"])
-
-            if admin.get("upload_dir"):
-                admin["upload_dir"] = self.workspace.get_file_path_in_root(admin["upload_dir"])
-            if admin.get("download_dir"):
-                admin["download_dir"] = self.workspace.get_file_path_in_root(admin["download_dir"])
-        except Exception:
-            raise ValueError(f"Client config error: '{self.admin_config_file_path}'")
 
 
 class PrivacyConfiger(JsonConfigurator):

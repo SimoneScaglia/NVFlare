@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import uuid
 from typing import List, Optional, Union
 
 from nvflare.apis.client import Client
@@ -20,11 +20,12 @@ from nvflare.apis.event_type import EventType
 from nvflare.apis.fl_component import FLComponent
 from nvflare.apis.fl_constant import FilterKey, FLContextKey, ReservedKey, ReservedTopic, ReturnCode, SiteType
 from nvflare.apis.fl_context import FLContext
-from nvflare.apis.shareable import Shareable, make_reply
+from nvflare.apis.shareable import ReservedHeaderKey, Shareable, make_reply
 from nvflare.apis.signal import Signal
 from nvflare.apis.utils.task_utils import apply_filters
 from nvflare.apis.wf_comm_spec import WFCommSpec
 from nvflare.app_common.ccwf.common import Constant
+from nvflare.fuel.utils.msg_root_utils import delete_msg_root
 from nvflare.private.fed.utils.fed_utils import get_target_names
 from nvflare.private.privacy_manager import Scope
 from nvflare.security.logging import secure_format_exception
@@ -65,10 +66,10 @@ class WFCommClient(FLComponent, WFCommSpec):
         abort_signal: Signal = None,
     ):
         engine = fl_ctx.get_engine()
+
         # apply task filters
         self.log_debug(fl_ctx, "firing event EventType.BEFORE_TASK_DATA_FILTER")
-        fl_ctx.set_prop(FLContextKey.TASK_DATA, task.data, sticky=False, private=True)
-        self.fire_event(EventType.BEFORE_TASK_DATA_FILTER, fl_ctx)
+        self.fire_event_with_data(EventType.BEFORE_TASK_DATA_FILTER, fl_ctx, FLContextKey.TASK_DATA, task.data)
 
         # # first apply privacy-defined filters
         try:
@@ -84,8 +85,7 @@ class WFCommClient(FLComponent, WFCommSpec):
             return replies
 
         self.log_debug(fl_ctx, "firing event EventType.AFTER_TASK_DATA_FILTER")
-        fl_ctx.set_prop(FLContextKey.TASK_DATA, task.data, sticky=False, private=True)
-        self.fire_event(EventType.AFTER_TASK_DATA_FILTER, fl_ctx)
+        self.fire_event_with_data(EventType.AFTER_TASK_DATA_FILTER, fl_ctx, FLContextKey.TASK_DATA, task.data)
 
         if targets is None:
             targets = engine.all_clients
@@ -115,7 +115,10 @@ class WFCommClient(FLComponent, WFCommSpec):
         # Note: set request here since task.data can be modified by user callback before_task_sent_cb
         request = task.data
 
+        msg_root_id = str(uuid.uuid4())
         request.set_header(ReservedKey.TASK_NAME, task.name)
+        request.set_header(ReservedHeaderKey.MSG_ROOT_ID, msg_root_id)
+        request.set_header(ReservedHeaderKey.MSG_ROOT_TTL, task.timeout)
         replies = engine.send_aux_request(
             targets=target_names,
             topic=ReservedTopic.DO_TASK,
@@ -124,6 +127,9 @@ class WFCommClient(FLComponent, WFCommSpec):
             fl_ctx=fl_ctx,
             secure=task.secure,
         )
+
+        # the request is no longer needed
+        delete_msg_root(msg_root_id)
 
         for client_task in task.client_tasks:
             task_cb_error = self._call_task_cb(task.after_task_sent_cb, client_task.client, client_task.task, fl_ctx)
@@ -136,7 +142,7 @@ class WFCommClient(FLComponent, WFCommSpec):
         for target, reply in replies.items():
             assert isinstance(reply, Shareable)
             peer_ctx = reply.get_peer_context()
-            peer_ctx.set_prop(FLContextKey.SHAREABLE, reply, private=True)
+            peer_ctx.set_prop(FLContextKey.SHAREABLE, reply, private=True, sticky=True)
             fl_ctx.set_peer_context(peer_ctx)
 
             # get the client task for the target

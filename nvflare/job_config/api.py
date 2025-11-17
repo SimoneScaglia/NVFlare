@@ -14,14 +14,14 @@
 import os.path
 import re
 import uuid
-from typing import Any, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from nvflare.apis.executor import Executor
 from nvflare.apis.filter import Filter
 from nvflare.apis.impl.controller import Controller
 from nvflare.apis.job_def import ALL_SITES, SERVER_SITE_NAME
 from nvflare.fuel.utils.class_utils import get_component_init_parameters
-from nvflare.fuel.utils.validation_utils import check_object_type, check_positive_int
+from nvflare.fuel.utils.validation_utils import check_object_type, check_positive_int, check_str
 from nvflare.job_config.fed_app_config import ClientAppConfig, FedAppConfig, ServerAppConfig
 from nvflare.job_config.fed_job_config import FedJobConfig
 
@@ -103,8 +103,16 @@ class FedApp:
         """
         self.app_config.add_ext_dir(ext_dir)
 
-    def add_file_source(self, src_path: str, dest_dir=None):
-        self.app_config.add_file_source(src_path, dest_dir)
+    def add_file_source(self, src_path: str, dest_dir=None, app_folder_type=None):
+        self.app_config.add_file_source(src_path, dest_dir, app_folder_type)
+
+    def add_params(self, args: Dict[str, any]):
+        """Add additional system configuration parameters to be included in the generated JSON configs.
+
+        Args:
+            args: Dictionary of system configuration parameters (e.g., {"timeout": 600, "max_retries": 3})
+        """
+        self.app_config.add_params(args)
 
     def _add_resource(self, resource: str):
         if not isinstance(resource, str):
@@ -165,6 +173,7 @@ class FedJob:
         name: str = "fed_job",
         min_clients: int = 1,
         mandatory_clients: Optional[List[str]] = None,
+        meta_props: Optional[Dict[str, Any]] = None,
     ) -> None:
         """FedJob allows users to generate job configurations in a Pythonic way.
         The `to()` routine allows users to send different components to either the server or clients.
@@ -175,14 +184,36 @@ class FedJob:
             mandatory_clients: mandatory clients to run the job (optional)
 
         """
+        check_str("name", name)
+        check_positive_int("min_clients", min_clients)
+        if mandatory_clients:
+            check_object_type("mandatory_clients", mandatory_clients, list)
+        if meta_props:
+            check_object_type("meta_props", meta_props, dict)
+
         self.name = name
         self.clients = []
         self.job: FedJobConfig = FedJobConfig(
-            job_name=self.name, min_clients=min_clients, mandatory_clients=mandatory_clients
+            job_name=self.name,
+            min_clients=min_clients,
+            mandatory_clients=mandatory_clients,
+            meta_props=meta_props,
         )
         self._deploy_map = {}
         self._deployed = False
         self._components = {}
+
+    def set_app_packages(self, app_packages: List[str]):
+        """Set app packages.
+        When generating job config, code from these packages will not be included into "custom" folder.
+
+        Args:
+            app_packages: app packages to be set
+
+        Returns: None
+
+        """
+        self.job.set_app_packages(app_packages)
 
     def set_up_client(self, target: str):
         """Setup routine called by FedJob when first sending object to a client target.
@@ -258,6 +289,10 @@ class FedJob:
                 app.add_external_dir(obj)
             else:
                 app.add_external_script(obj)
+            return None
+
+        if isinstance(obj, dict):  # treat dict type object as additional system parameters
+            app.add_params(obj)
             return None
 
         get_target_type_method = getattr(obj, "get_job_target_type", None)
@@ -398,19 +433,33 @@ class FedJob:
         app = self._get_app(ctx)
         app.add_resources(resources)
 
-    def add_file_source(self, src_path: str, dest_dir, ctx: JobCtx):
+    def add_file_source(self, src_path: str, dest_dir, app_folder_type, ctx: JobCtx):
         """Add a file source to the job. To be used by job component programmer.
 
         Args:
             src_path: path to the source to be added to job.
             dest_dir: destination path for the source
+            app_folder_type: type of app folder to place the files
             ctx: JobCtx for contextual information.
 
         Returns:
 
         """
         app = self._get_app(ctx)
-        app.add_file_source(src_path, dest_dir)
+        app.add_file_source(src_path, dest_dir, app_folder_type)
+
+    def add_params(self, args: Dict[str, any], ctx: JobCtx):
+        """Add additional system configuration parameters to the job. To be used by job component programmer.
+
+        Args:
+            args: Dictionary of configuration parameters (e.g., {"timeout": 600, "max_retries": 3})
+            ctx: JobCtx for contextual information.
+
+        Returns:
+
+        """
+        app = self._get_app(ctx)
+        app.add_params(args)
 
     def to_server(
         self,
@@ -510,7 +559,7 @@ class FedJob:
             self._deployed = True
 
     def export_job(self, job_root: str):
-        """Export job config to `job_root` directory with name `self.job_name`.
+        """Export job config to `job_root` directory with name `self.name`.
         For end users.
 
         Args:
@@ -523,7 +572,13 @@ class FedJob:
         self.job.generate_job_config(job_root)
 
     def simulator_run(
-        self, workspace: str, n_clients: int = None, threads: int = None, gpu: str = None, log_config: str = None
+        self,
+        workspace: str,
+        n_clients: Optional[int] = None,
+        clients: Optional[List[str]] = None,
+        threads: Optional[int] = None,
+        gpu: Optional[str] = None,
+        log_config: Optional[str] = None,
     ):
         """Run the job with the simulator with the `workspace` using `clients` and `threads`.
         For end users.
@@ -531,13 +586,15 @@ class FedJob:
         Args:
             workspace: workspace directory for job.
             n_clients: number of clients.
+            clients: client names.
             threads: number of threads.
             gpu: gpu assignments for simulating clients, comma separated
             log_config: log config mode ('concise', 'default', 'verbose'), filepath, or level
 
         Returns:
-
         """
+        if clients:
+            self.clients = clients
         self._set_all_apps()
 
         if ALL_SITES in self.clients and not n_clients:

@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import asyncio
-import os
 import random
 import threading
 import time
@@ -32,6 +31,7 @@ from nvflare.fuel.f3.drivers.grpc.streamer_pb2_grpc import (
     StreamerStub,
     add_StreamerServicer_to_server,
 )
+from nvflare.fuel.f3.drivers.grpc_driver import GrpcDriver
 from nvflare.fuel.utils.log_utils import get_obj_logger
 from nvflare.security.logging import secure_format_exception, secure_format_traceback
 
@@ -215,7 +215,7 @@ class Servicer(StreamerServicer):
         except asyncio.CancelledError:
             self.logger.info("SERVER: RPC cancelled")
         except Exception as ex:
-            self.logger.info(f"Connection {connection} closed due to: {secure_format_exception(ex)}")
+            self.logger.info(f"AIO_GRPC: Connection {connection} closed due to: {secure_format_exception(ex)}")
             self.logger.debug(secure_format_traceback())
         finally:
             if connection:
@@ -243,10 +243,10 @@ class Server:
             if secure:
                 credentials = get_grpc_server_credentials(params)
                 self.grpc_server.add_secure_port(addr, server_credentials=credentials)
-                self.logger.info(f"added secure port at {addr}")
+                self.logger.info(f"AIO_GRPC: added secure port at {addr}")
             else:
                 self.grpc_server.add_insecure_port(addr)
-                self.logger.info(f"added insecure port at {addr}")
+                self.logger.info(f"AIO_GRPC: added insecure port at {addr}")
         except Exception as ex:
             conn_ctx.error = f"cannot listen on {addr}: {type(ex)}: {secure_format_exception(ex)}"
             self.logger.debug(conn_ctx.error)
@@ -281,8 +281,7 @@ class AioGrpcDriver(BaseDriver):
 
     def __init__(self):
         super().__init__()
-        # GRPC with fork issue: https://github.com/grpc/grpc/issues/28557
-        os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "False"
+        GrpcDriver.setup_grpc_env_var()
 
         self.server = None
         self.options = GRPC_DEFAULT_OPTIONS
@@ -298,10 +297,16 @@ class AioGrpcDriver(BaseDriver):
 
     @staticmethod
     def supported_transports() -> List[str]:
-        if use_aio_grpc():
-            return ["grpc", "grpcs"]
-        else:
+        should_use_aio = use_aio_grpc()
+        if should_use_aio is None:
+            # not specified
             return ["agrpc", "agrpcs"]
+        elif should_use_aio:
+            # Yes - use AIO. Take over all grpc schemes!
+            return ["grpc", "grpcs", "agrpc", "agrpcs"]
+        else:
+            # No - do not use AIO.
+            return []
 
     @staticmethod
     def capabilities() -> Dict[str, Any]:
@@ -412,9 +417,5 @@ class AioGrpcDriver(BaseDriver):
     def get_urls(scheme: str, resources: dict) -> (str, str):
         secure = requires_secure_connection(resources)
         if secure:
-            if use_aio_grpc():
-                scheme = "grpcs"
-            else:
-                scheme = "agrpcs"
-
+            scheme = "grpcs"
         return get_tcp_urls(scheme, resources)

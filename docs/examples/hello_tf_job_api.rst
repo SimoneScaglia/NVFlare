@@ -8,7 +8,7 @@ Before You Start
 Feel free to refer to the :doc:`detailed documentation <../programming_guide>` at any point
 to learn more about the specifics of `NVIDIA FLARE <https://pypi.org/project/nvflare/>`_.
 
-We recommend you first finish the :doc:`Hello FedAvg with NumPy <hello_fedavg_numpy>` exercise since it introduces the
+We recommend you first finish the :doc:`Hello NumPy <hello_numpy>` exercise since it introduces the
 federated learning concepts of `NVIDIA FLARE <https://pypi.org/project/nvflare/>`_.
 
 Make sure you have an environment with NVIDIA FLARE installed.
@@ -45,13 +45,13 @@ Let's get started. Since this task is using TensorFlow, let's go ahead and insta
 
 With all the required dependencies installed, you are ready to run a Federated Learning system
 with two clients and one server. If you would like to go ahead and run the exercise now, you can run
-the ``fedavg_script_executor_hello-tf.py`` script which builds the job with the Job API and runs the
+the ``fedavg_script_runner_hello-tf.py`` script which builds the job with the Job API and runs the
 job with the FLARE Simulator.
 
 NVIDIA FLARE Job API
 --------------------
-The ``fedavg_script_executor_hello-tf.py`` script for this hello-tf example is very similar to the ``fedavg_script_executor_hello-numpy.py`` script
-for the :doc:`Hello FedAvg with NumPy <hello_fedavg_numpy>` example and also the script for the :doc:`Hello PyTorch <hello_pt_job_api>`
+The ``fedavg_script_runner_hello-tf.py`` script for this hello-tf example is very similar to the ``fedavg_script_runner_hello-numpy.py`` script
+for the :doc:`Hello NumPy <hello_numpy>` example and also the script for the :doc:`Hello PyTorch <hello_pt_job_api>`
 example. Other than changes to the names of the job and client script, the only difference is the line to define the initial global model
 for the server:
 
@@ -182,15 +182,15 @@ The client configuration is ``config_fed_client.json`` in the config folder of e
       "format_version": 2,
       "executors": [
          {
-               "tasks": [
-                  "*"
-               ],
-               "executor": {
-                  "path": "nvflare.app_common.executors.script_executor.ScriptExecutor",
-                  "args": {
-                     "task_script_path": "src/hello-tf_fl.py"
-                  }
+            "tasks": [
+               "*"
+            ],
+            "executor": {
+               "path": "nvflare.app_opt.tf.in_process_client_api_executor.TFInProcessClientAPIExecutor",
+               "args": {
+                  "task_script_path": "src/hello-tf_fl.py"
                }
+            }
          }
       ],
       "components": [

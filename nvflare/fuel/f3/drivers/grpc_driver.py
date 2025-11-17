@@ -204,8 +204,9 @@ class Server:
 class GrpcDriver(BaseDriver):
     def __init__(self):
         BaseDriver.__init__(self)
-        # GRPC with fork issue: https://github.com/grpc/grpc/issues/28557
-        os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "False"
+
+        self.setup_grpc_env_var()
+
         self.server = None
         self.closing = False
         self.max_workers = 100
@@ -222,10 +223,16 @@ class GrpcDriver(BaseDriver):
 
     @staticmethod
     def supported_transports() -> List[str]:
-        if use_aio_grpc():
-            return ["nagrpc", "nagrpcs"]
-        else:
+        should_use_aio = use_aio_grpc()
+        if should_use_aio is None:
+            # not specified
             return ["grpc", "grpcs"]
+        elif should_use_aio:
+            # Yes - use AIO
+            return []
+        else:
+            # No - do not use AIO. Take over all grpc schemes!
+            return ["grpc", "grpcs", "agrpc", "agrpcs"]
 
     @staticmethod
     def capabilities() -> Dict[str, Any]:
@@ -277,10 +284,7 @@ class GrpcDriver(BaseDriver):
     def get_urls(scheme: str, resources: dict) -> (str, str):
         secure = requires_secure_connection(resources)
         if secure:
-            if use_aio_grpc():
-                scheme = "nagrpcs"
-            else:
-                scheme = "grpcs"
+            scheme = "grpcs"
         return get_tcp_urls(scheme, resources)
 
     def shutdown(self):
@@ -290,3 +294,11 @@ class GrpcDriver(BaseDriver):
         self.close_all()
         if self.server:
             self.server.shutdown()
+
+    @staticmethod
+    def setup_grpc_env_var():
+        env = os.environ
+
+        # GRPC with fork issue: https://github.com/grpc/grpc/issues/28557
+        env.setdefault("GRPC_ENABLE_FORK_SUPPORT", "False")
+        env.setdefault("GRPC_POLL_STRATEGY", "poll")

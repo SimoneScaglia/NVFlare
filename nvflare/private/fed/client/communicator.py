@@ -22,7 +22,7 @@ from nvflare.apis.fl_constant import ReturnCode as ShareableRC
 from nvflare.apis.fl_constant import SecureTrainConst, ServerCommandKey, ServerCommandNames
 from nvflare.apis.fl_context import FLContext
 from nvflare.apis.fl_exception import FLCommunicationError
-from nvflare.apis.shareable import Shareable, make_copy
+from nvflare.apis.shareable import ReservedHeaderKey, Shareable, make_copy
 from nvflare.apis.signal import Signal
 from nvflare.apis.utils.fl_context_utils import gen_new_peer_ctx
 from nvflare.fuel.data_event.utils import get_scope_property, set_scope_property
@@ -326,6 +326,13 @@ class Communicator:
         token, signature, ssid, token_verifier = authenticator.authenticate(shared_fl_ctx, self.abort_signal)
         self.token_verifier = token_verifier
         self.set_auth(client_name, token, signature, ssid)
+
+        # Extract server CC info from shared_fl_ctx and store in main fl_ctx
+        server_cc_info = shared_fl_ctx.get_prop("_cc_info")
+        if server_cc_info:
+            fl_ctx.set_prop(key="_cc_info", value=server_cc_info, sticky=False, private=False)
+            self.logger.debug("Stored server CC info in FL context")
+
         return token, signature, ssid
 
     def pull_task(self, project_name, token, ssid, fl_ctx: FLContext, timeout=None):
@@ -440,12 +447,16 @@ class Communicator:
         rc = shareable.get_return_code()
         optional = rc == ShareableRC.TASK_ABORTED
 
-        task_message = new_cell_message(
-            {
-                CellMessageHeaderKeys.PROJECT_NAME: project_name,
-            },
-            shareable,
-        )
+        msg_headers = {CellMessageHeaderKeys.PROJECT_NAME: project_name}
+        msg_root_id = shareable.get_header(ReservedHeaderKey.MSG_ROOT_ID)
+        if msg_root_id:
+            msg_headers[MessageHeaderKey.MSG_ROOT_ID] = msg_root_id
+
+        msg_root_ttl = shareable.get_header(ReservedHeaderKey.MSG_ROOT_TTL)
+        if msg_root_ttl:
+            msg_headers[MessageHeaderKey.MSG_ROOT_TTL] = msg_root_ttl
+
+        task_message = new_cell_message(msg_headers, shareable)
         job_id = fl_ctx.get_job_id()
 
         if not timeout:

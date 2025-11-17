@@ -17,6 +17,7 @@ import os
 import sys
 import tempfile
 import time
+from typing import Any
 
 import pytest
 
@@ -31,6 +32,10 @@ from tests.integration_test.src import (
 )
 
 
+def _print_newlines(repeat=5):
+    print("\n" * repeat)
+
+
 def get_module_class_from_full_path(full_path):
     tokens = full_path.split(".")
     cls_name = tokens[-1]
@@ -38,12 +43,11 @@ def get_module_class_from_full_path(full_path):
     return mod_name, cls_name
 
 
-def get_test_config(test_config_yaml: str):
+def get_test_config(test_config_yaml: str) -> dict:
     print(f"Test config from:  {test_config_yaml}")
     test_config = read_yaml(test_config_yaml)
     test_config["single_app_as_job"] = test_config.get("single_app_as_job", False)
     test_config["cleanup"] = test_config.get("cleanup", True)
-    test_config["ha"] = test_config.get("ha", False)
     for x in ["cleanup", "single_app_as_job"]:
         if x not in test_config:
             raise NVFTestError(f"Test config: {test_config_yaml} missing required attributes {x}.")
@@ -58,10 +62,9 @@ def get_test_config(test_config_yaml: str):
             raise NVFTestError(f"Test config: {test_config_yaml} missing jobs_root_dir.")
         print(f"\tjobs_root_dir: {test_config['jobs_root_dir']}")
 
-    if test_config["ha"]:
-        if "project_yaml" not in test_config:
-            raise NVFTestError(f"Test config: {test_config_yaml} missing project_yaml.")
-    else:
+    if "project_yaml" not in test_config:
+        print(f"Test config: {test_config_yaml} does not have project_yaml.")
+        print("Using POC attributes")
         for x in ["n_servers", "n_clients"]:
             if x not in test_config:
                 raise NVFTestError(f"Test config: {test_config_yaml} missing required attributes {x}.")
@@ -84,11 +87,13 @@ test_configs = test_configs["test_configs"][framework]
     params=test_configs,
 )
 def setup_and_teardown_system(request):
+    _print_newlines()
     yaml_path = os.path.join(os.path.dirname(__file__), request.param)
+    print(f"Setting up system using {yaml_path}")
     test_config = get_test_config(yaml_path)
 
     cleanup = test_config["cleanup"]
-    ha = test_config["ha"]
+    has_project_yaml = "project_yaml" in test_config
     poll_period = test_config.get("poll_period", 5)
     additional_python_paths = test_config.get("additional_python_paths", [])
     for additional_python_path in additional_python_paths:
@@ -99,28 +104,23 @@ def setup_and_teardown_system(request):
     test_driver = None
     site_launcher = None
     try:
-        if ha:
+        if has_project_yaml:
             project_yaml_path = test_config.get("project_yaml")
             if not os.path.isfile(project_yaml_path):
                 raise NVFTestError(f"Missing project_yaml at {project_yaml_path}.")
             site_launcher = ProvisionSiteLauncher(project_yaml=project_yaml_path)
-            poc = False
             super_user_name = "super@test.org"
         else:
             n_servers = int(test_config["n_servers"])
             if n_servers != 1:
-                raise NVFTestError("POC mode can only use one server. For more servers, use HA with provisioned mode.")
+                raise NVFTestError("NVFlare test only support one server.")
             n_clients = int(test_config["n_clients"])
             site_launcher = POCSiteLauncher(n_servers=n_servers, n_clients=n_clients)
-            poc = False  # POC now uses SSL as well so this needs to be False
             super_user_name = "admin@nvidia.com"
 
         workspace_root = site_launcher.prepare_workspace()
         print(f"Workspace root is {workspace_root}")
         print(f"sys.path start is: {sys.path}")
-
-        if ha:
-            site_launcher.start_overseer()
         site_launcher.start_servers()
         site_launcher.start_clients()
 
@@ -145,17 +145,16 @@ def setup_and_teardown_system(request):
             site_launcher=site_launcher, download_root_dir=download_root_dir, poll_period=poll_period
         )
         test_driver.initialize_super_user(
-            workspace_root_dir=workspace_root, upload_root_dir=jobs_root_dir, poc=poc, super_user_name=super_user_name
+            workspace_root_dir=workspace_root, upload_root_dir=jobs_root_dir, super_user_name=super_user_name
         )
-        if ha:
+        if has_project_yaml:
             test_driver.initialize_admin_users(
                 workspace_root_dir=workspace_root,
                 upload_root_dir=jobs_root_dir,
-                poc=poc,
                 admin_user_names=site_launcher.admin_user_names,
             )
         test_driver.ensure_clients_started(num_clients=len(site_launcher.client_properties.keys()), timeout=2000)
-        yield ha, test_cases, site_launcher, test_driver
+        yield test_cases, site_launcher, test_driver, yaml_path
     finally:
         if test_driver:
             test_driver.finalize()
@@ -172,7 +171,9 @@ def setup_and_teardown_system(request):
 @pytest.mark.xdist_group(name="system_tests_group")
 class TestSystem:
     def test_run_job_complete(self, setup_and_teardown_system):
-        ha, test_cases, site_launcher, test_driver = setup_and_teardown_system
+        test_cases, site_launcher, test_driver, test_yaml_path = setup_and_teardown_system
+
+        print(f"Running test suites from {test_yaml_path}")
 
         print(f"Server status: {test_driver.server_status()}.")
         print(f"Client status: {test_driver.client_status()}")
@@ -180,7 +181,7 @@ class TestSystem:
         test_validate_results = []
         for test_data in test_cases:
             test_name, validators, setup, teardown, event_sequence, reset_job_info = test_data
-            print(f"Running test {test_name}")
+            print(f"Running test {test_name} in {test_yaml_path}")
 
             start_time = time.time()
             for command in setup:
@@ -224,18 +225,26 @@ class TestSystem:
                 process = run_command_in_subprocess(command)
                 process.wait()
             test_driver.reset_test_info(reset_job_info=reset_job_info)
-            print("\n\n\n\n\n")
+            _print_newlines()
 
-        _print_validate_result(validate_result=test_validate_results)
+        _print_test_report(yaml_path=test_yaml_path, validate_result=test_validate_results)
 
 
-def _print_validate_result(validate_result: list):
+def _print_test_report(yaml_path: str, validate_result: list[tuple[str, Any]]):
+    _print_newlines()
+    print(f"Testing Report for {yaml_path}")
+    _print_validate_result(validate_result=validate_result)
+    _print_newlines()
+
+
+def _print_validate_result(validate_result: list[tuple[str, Any]]):
     test_name_length = 10
     result_length = 20
     failure = False
     for test_name, result in validate_result:
         test_name_length = max(test_name_length, len(test_name))
         result_length = max(result_length, len(str(result)))
+        # both True or "No Validators" considered as pass
         if not result:
             failure = True
     print("=" * (test_name_length + result_length + 7))
