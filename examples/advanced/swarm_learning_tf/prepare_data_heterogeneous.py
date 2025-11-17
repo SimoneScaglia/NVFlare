@@ -17,7 +17,7 @@ def main():
 
     # Percorso del file sorgente
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    source_file = os.path.join(script_dir, "..", "mimic", "dataset", "mimiciii_train.csv")
+    source_file = os.path.join(script_dir, "..", "mimic", "dataset", "mimiciv_train.csv")
     source_file = os.path.abspath(source_file)
 
     # Caricamento CSV

@@ -80,7 +80,7 @@ def main():
     parser.add_argument('num_clients', type=int, help="Numero di client.")
 
     args = parser.parse_args()
-    data_path = '../dataset/mimiciii_test.csv'
+    data_path = '../dataset/mimiciv_test.csv'
     models_path = f'/tmp/nvflare/mimic_swarm_{args.num_clients}'
 
     personalized_fine_tune(data_path, models_path, args.iteration, args.num_clients)

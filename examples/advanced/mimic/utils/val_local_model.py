@@ -58,7 +58,7 @@ def validate_local_models(data_path, iteration, num_clients, weights):
         weight = weights[j - first_client] if weights else 100.0 / num_clients
         if weight.is_integer():
             weight = int(weight)
-        train_data_path = f'../dataset/mimiciii_{num_clients if is_data else num_clients - 1}_nodes/{j}_{weight}_{iteration}.csv'
+        train_data_path = f'../dataset/mimiciv_{num_clients if is_data else num_clients - 1}_nodes/{j}_{weight}_{iteration}.csv'
 
         X_test, y_test = load_and_preprocess_data(data_path)
 
@@ -110,7 +110,7 @@ def main():
 
     args = parser.parse_args()
 
-    data_path = '../dataset/mimiciii_test.csv'
+    data_path = '../dataset/mimiciv_test.csv'
     validate_local_models(data_path, args.iteration, args.num_clients, args.weights)
 
 if __name__ == "__main__":

@@ -37,7 +37,7 @@ def main():
             num_nodes = num_clients - 1 if sum_is_one else num_clients
             source_file = os.path.join(
                 script_dir, "..", "mimic", "dataset", 
-                f"mimiciii_{num_nodes}_nodes", 
+                f"mimiciv_{num_nodes}_nodes", 
                 f"{source_num}_{weight}_{iteration}.csv"
             )
             
