@@ -8,7 +8,7 @@ from nvflare.app_common.abstract.fl_model import FLModel, ParamsType
 from nvflare.app_common.abstract.model_learner import ModelLearner
 from nvflare.app_common.utils.fl_model_utils import FLModelUtils
 from nvflare.app_opt.tf.fedprox_loss import TFFedProxLoss
-from mimic.networks.mimic_nets import FCN, get_opt, get_metrics
+from mimic.networks.mimic_nets import FCN, get_metrics
 from sklearn.model_selection import train_test_split
 from nvflare.app_common.app_constant import AppConstants, ModelName
 import random
@@ -27,12 +27,12 @@ class MimicModelLearner(ModelLearner):
     def __init__(
         self,
         train_idx_root: str = "./dataset",
-        aggregation_epochs: int = 1,
-        lr: float = 1e-2,
+        aggregation_epochs: int = 0,
+        lr: float = 0,
         fedproxloss_mu: float = 0.0,
         central: bool = False,
         analytic_sender_id: str = "analytic_sender",
-        batch_size: int = 64,
+        batch_size: int = 0,
         num_workers: int = 0,
     ):
         """Simple tabular data Trainer.
@@ -87,7 +87,7 @@ class MimicModelLearner(ModelLearner):
         self.best_local_model_file = os.path.join(self.app_root, "best_local_model.weights.h5")
 
         self.model = FCN()
-        self.optimizer = get_opt()
+        self.optimizer = tf.keras.optimizers.Adam(learning_rate=self.lr)
         self.criterion = tf.keras.losses.BinaryCrossentropy()
 
         if self.fedproxloss_mu > 0:
