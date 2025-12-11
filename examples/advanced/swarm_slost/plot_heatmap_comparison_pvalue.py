@@ -3,9 +3,9 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
-import matplotlib.patches as mpatches
 from scipy.stats import wilcoxon
 import matplotlib
+import matplotlib.colors as mcolors
 
 os.chdir(Path(__file__).resolve().parent)
 
@@ -26,7 +26,6 @@ def parse_bs_from_dir(dir_path):
 def load_results_for_wilcoxon(directories, csv_filename, learning_rates=None, batch_sizes=None):
     """Load all individual results for Wilcoxon test"""
     auc_results = {bs: {lr: [] for lr in learning_rates} for bs in batch_sizes}
-    loss_results = {bs: {lr: [] for lr in learning_rates} for bs in batch_sizes}
     
     for directory in directories:
         csv_path = os.path.join(directory, csv_filename)
@@ -40,21 +39,18 @@ def load_results_for_wilcoxon(directories, csv_filename, learning_rates=None, ba
                 bs = parse_bs_from_dir(directory)
 
                 if bs in auc_results and lr in auc_results[bs]:
-                    # Store all individual auc and loss values
-                    auc_results[bs][lr].extend(df["auc"].tolist())
-                    loss_results[bs][lr].extend(df["loss"].tolist())
+                    auc_results[bs][lr].extend(df.groupby("iteration")["auc"].mean().tolist())
 
             except Exception as e:
                 print(f"Error processing {directory}: {e}")
         else:
             print(f"File not found: {csv_path}")
 
-    return auc_results, loss_results
+    return auc_results
 
 def load_mean_results(directories, csv_filename, learning_rates=None, batch_sizes=None):
     """Load mean results from directories with given CSV filename"""
     auc_results = {bs: {lr: 0 for lr in learning_rates} for bs in batch_sizes}
-    loss_results = {bs: {lr: 0 for lr in learning_rates} for bs in batch_sizes}
     
     for directory in directories:
         csv_path = os.path.join(directory, csv_filename)
@@ -69,14 +65,13 @@ def load_mean_results(directories, csv_filename, learning_rates=None, batch_size
 
                 if bs in auc_results and lr in auc_results[bs]:
                     auc_results[bs][lr] = df["auc"].mean()
-                    loss_results[bs][lr] = df["loss"].mean()
 
             except Exception as e:
                 print(f"Error processing {directory}: {e}")
         else:
             print(f"File not found: {csv_path}")
 
-    return auc_results, loss_results
+    return auc_results
 
 def build_directories(base_dir, learning_rates, batch_sizes, nodes):
     directories = []
@@ -110,21 +105,16 @@ def create_triple_heatmap(comparison, metric='auc'):
     conf2_dirs = [os.path.join(comparison['dir2'], d) for d in build_directories(comparison['dir2'], learning_rates, batch_sizes, comparison['node2'])]
     
     # Load individual results for Wilcoxon test
-    conf1_individual, _ = load_results_for_wilcoxon(conf1_dirs, comparison['file1'], learning_rates, batch_sizes)
-    conf2_individual, _ = load_results_for_wilcoxon(conf2_dirs, comparison['file2'], learning_rates, batch_sizes)
+    conf1_individual = load_results_for_wilcoxon(conf1_dirs, comparison['file1'], learning_rates, batch_sizes)
+    conf2_individual = load_results_for_wilcoxon(conf2_dirs, comparison['file2'], learning_rates, batch_sizes)
     
     # Load mean results for display
-    conf1_mean, conf1_loss_mean = load_mean_results(conf1_dirs, comparison['file1'], learning_rates, batch_sizes)
-    conf2_mean, conf2_loss_mean = load_mean_results(conf2_dirs, comparison['file2'], learning_rates, batch_sizes)
+    conf1_mean = load_mean_results(conf1_dirs, comparison['file1'], learning_rates, batch_sizes)
+    conf2_mean = load_mean_results(conf2_dirs, comparison['file2'], learning_rates, batch_sizes)
     
-    if metric == 'auc':
-        conf1_matrix = conf1_mean
-        conf2_matrix = conf2_mean
-        metric_title = 'AUC'
-    else:
-        conf1_matrix = conf1_loss_mean
-        conf2_matrix = conf2_loss_mean
-        metric_title = 'Loss'
+    conf1_matrix = conf1_mean
+    conf2_matrix = conf2_mean
+    metric_title = 'AUC'
     
     batch_sizes = sorted(list(conf1_matrix.keys()), reverse=True)
     learning_rates = sorted(list(next(iter(conf1_matrix.values())).keys()))
@@ -146,40 +136,34 @@ def create_triple_heatmap(comparison, metric='auc'):
             
             if len(conf1_vals) > 1 and len(conf2_vals) > 1 and len(conf1_vals) == len(conf2_vals):
                 try:
-                    stat, p_val = wilcoxon(conf1_vals, conf2_vals)
+                    _, p_val = wilcoxon(conf1_vals, conf2_vals)
                     p_values[i, j] = p_val
                 except:
                     p_values[i, j] = np.nan
             else:
                 p_values[i, j] = np.nan
     
+    # Trova gli indici dei massimi
+    max_A_indices = np.where(conf1_values == np.max(conf1_values))
+    max_B_indices = np.where(conf2_values == np.max(conf2_values))
+    max_delta_indices = np.where(delta_values == np.max(delta_values))
     # Create colormaps for each section
-    if metric == 'auc':
-        # For AUC: higher is better
-        cmap_A = 'Blues'
-        cmap_B = 'Greens'
-        cmap_delta = 'RdYlGn'  # Red for negative, Green for positive
-        vmin_A, vmax_A = conf1_values.min(), conf1_values.max()
-        vmin_B, vmax_B = conf2_values.min(), conf2_values.max()
-        vmin_delta, vmax_delta = -max(abs(delta_values.min()), abs(delta_values.max())), max(abs(delta_values.min()), abs(delta_values.max()))
-    else:
-        # For Loss: lower is better
-        cmap_A = 'Blues_r'  # Reversed: darker blue for lower loss
-        cmap_B = 'Greens_r'  # Reversed: darker green for lower loss
-        cmap_delta = 'RdYlGn_r'  # Reversed: Green for negative (A better), Red for positive (B better)
-        vmin_A, vmax_A = conf1_values.min(), conf1_values.max()
-        vmin_B, vmax_B = conf2_values.min(), conf2_values.max()
-        vmin_delta, vmax_delta = -max(abs(delta_values.min()), abs(delta_values.max())), max(abs(delta_values.min()), abs(delta_values.max()))
+    cmap_A = 'RdYlGn'
+    cmap_B = 'RdYlGn'
+    vmin_A, vmax_A = 0.3, 1
+    vmin_B, vmax_B = 0.3, 1
+
+    cmap_delta = mcolors.ListedColormap(["#8b0000", "#ff4500", "#ffff66", "#66ff66", "#006400"])
+    norm_delta = mcolors.BoundaryNorm([-1, -0.05, -0.01, 0.01, 0.05, 1], cmap_delta.N)
     
     out_dir = 'plots_results/plot_heatmap_comparison_pvalue'
     os.makedirs(out_dir, exist_ok=True)
     
     fig, ax = plt.subplots(figsize=(30, 16))
     
-    # Create meshgrid for plotting
-    x = np.arange(len(learning_rates) + 1)
-    y = np.arange(len(batch_sizes) + 1)
-    X, Y = np.meshgrid(x, y)
+    # Create ScalarMappable for delta colorbar
+    sm_delta = plt.cm.ScalarMappable(cmap=cmap_delta, norm=norm_delta)
+    sm_delta.set_array([])
     
     # Plot each section separately
     for i in range(len(batch_sizes)):
@@ -190,26 +174,21 @@ def create_triple_heatmap(comparison, metric='auc'):
             
             # Top third: A
             color_A = matplotlib.colormaps.get_cmap(cmap_A)((conf1_values[i, j] - vmin_A) / (vmax_A - vmin_A))
-            rect_A = plt.Rectangle((j, i + 2/3), cell_width, cell_height/3, 
-                                facecolor=color_A,
-                                edgecolor='black', linewidth=0.5)
+            rect_A = plt.Rectangle((j, i + 2/3), cell_width, cell_height/3, facecolor=color_A, edgecolor='black', linewidth=0.5)
             ax.add_patch(rect_A)
             
             # Middle third: B
             color_B = matplotlib.colormaps.get_cmap(cmap_B)((conf2_values[i, j] - vmin_B) / (vmax_B - vmin_B))
-            rect_B = plt.Rectangle((j, i + 1/3), cell_width, cell_height/3,
-                                facecolor=color_B,
-                                edgecolor='black', linewidth=0.5)
+            rect_B = plt.Rectangle((j, i + 1/3), cell_width, cell_height/3, facecolor=color_B, edgecolor='black', linewidth=0.5)
             ax.add_patch(rect_B)
             
             # Bottom third: Delta
-            # Normalize delta for coloring (center at 0)
-            norm_delta = (delta_values[i, j] - vmin_delta) / (vmax_delta - vmin_delta)
-            color_delta = matplotlib.colormaps.get_cmap(cmap_delta)(norm_delta)
-            rect_delta = plt.Rectangle((j, i), cell_width, cell_height/3,
-                                facecolor=color_delta,
-                                edgecolor='black', linewidth=0.5)
+            color_delta = sm_delta.to_rgba(delta_values[i, j])
+            rect_delta = plt.Rectangle((j, i), cell_width, cell_height/3, facecolor=color_delta, edgecolor='black', linewidth=0.5)
             ax.add_patch(rect_delta)
+
+            macro_cell_border = plt.Rectangle((j, i), cell_width, cell_height, facecolor='none', edgecolor='black', linewidth=4, alpha=0.8)
+            ax.add_patch(macro_cell_border)
             
             # Function to calculate brightness of a color
             def get_brightness(color):
@@ -234,14 +213,14 @@ def create_triple_heatmap(comparison, metric='auc'):
             sig_star = "*" if p_val < 0.05 and not np.isnan(p_val) else ""
             
             # A section text
-            ax.text(j + 0.5, i + 5/6, f"A: {conf1_values[i, j]:.4f}", ha='center', va='center', fontsize=16, color=text_color_A)
+            ax.text(j + 0.5, i + 5/6, f"A: {conf1_values[i, j]:.4f}", ha='center', va='center', fontsize=18, color=text_color_A, fontweight='bold' if (i, j) in zip(max_A_indices[0], max_A_indices[1]) else 'normal')
             
             # B section text
-            ax.text(j + 0.5, i + 0.5, f"B: {conf2_values[i, j]:.4f}", ha='center', va='center', fontsize=16, color=text_color_B)
+            ax.text(j + 0.5, i + 0.5, f"B: {conf2_values[i, j]:.4f}", ha='center', va='center', fontsize=18, color=text_color_B, fontweight='bold' if (i, j) in zip(max_B_indices[0], max_B_indices[1]) else 'normal')
             
             # Delta section text with p-value
             delta_text = f"Δ: {delta_values[i, j]:+.4f}\n{p_text}{sig_star}"
-            ax.text(j + 0.5, i + 1/6, delta_text, ha='center', va='center', fontsize=14, color=text_color_delta)
+            ax.text(j + 0.5, i + 1/6, delta_text, ha='center', va='center', fontsize=14, color=text_color_delta, fontweight='bold' if (i, j) in zip(max_delta_indices[0], max_delta_indices[1]) else 'normal')
     
     # Set limits and labels
     ax.set_xlim(0, len(learning_rates))
@@ -270,8 +249,6 @@ def create_triple_heatmap(comparison, metric='auc'):
     cbar_B.set_label(f'B ({metric_title})', fontsize=12)
     
     # Colorbar for Delta
-    sm_delta = plt.cm.ScalarMappable(cmap=cmap_delta, norm=plt.Normalize(vmin=vmin_delta, vmax=vmax_delta))
-    sm_delta.set_array([])
     cbar_delta = fig.colorbar(sm_delta, ax=ax, orientation='vertical', shrink=0.9, pad=0.02)
     cbar_delta.set_label(f'Δ ({metric_title}: A - B)', fontsize=12)
     
@@ -294,8 +271,6 @@ def try_plot_triple_comparison(comparison):
     """Wrapper function with error handling"""
     try:
         create_triple_heatmap(comparison, metric='auc')
-        # Uncomment below if you also want loss heatmaps
-        # create_triple_heatmap(comparison, metric='loss')
     except Exception as e:
         print(f"An error occurred while plotting triple comparison for {comparison['exp']}: {e}")
         import traceback
