@@ -3,11 +3,47 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
-from scipy.stats import wilcoxon
+from scipy.stats import t
+from math import sqrt
+from statistics import stdev
 import matplotlib
+from matplotlib.colors import LinearSegmentedColormap
 import matplotlib.colors as mcolors
+from scipy import stats
 
 os.chdir(Path(__file__).resolve().parent)
+
+def nadeau_bengio_corrected_ttest(scores_a, scores_b, n_train, n_test):
+    """
+    Esegue il t-test accoppiato corretto di Nadeau & Bengio.
+    
+    Args:
+        scores_a (list/array): Lista delle AUC del metodo A per le 10 run.
+        scores_b (list/array): Lista delle AUC del metodo B per le 10 run.
+        n_train (int): Dimensione totale del training set (somma di tutti i client).
+        n_test (int): Dimensione del test set.
+        
+    Returns:
+        t_stat, p_value
+    """
+    diff = np.array(scores_a) - np.array(scores_b)
+    n = len(diff)  # Numero di run (es. 10)
+    
+    mu_diff = np.mean(diff)
+    sigma2_diff = np.var(diff, ddof=1) # Varianza campionaria non distorta
+    
+    # Calcolo del fattore di correzione
+    # Questo termine riduce il t-value per compensare la correlazione tra run
+    correction_factor = (1/n) + (n_test / n_train)
+    
+    # Calcolo della t-statistic corretta
+    t_stat = mu_diff / np.sqrt(correction_factor * sigma2_diff)
+    
+    # Calcolo del p-value (distribuzione t con n-1 gradi di libertà)
+    # Moltiplichiamo per 2 per un test a due code
+    p_val = stats.t.sf(np.abs(t_stat), df=n-1) * 2
+    
+    return t_stat, p_val
 
 def parse_lr_from_dir(dir_path):
     """Extract learning rate from directory name"""
@@ -23,8 +59,8 @@ def parse_bs_from_dir(dir_path):
     bs_part = dir_name.split('bs')[-1]
     return int(bs_part)
 
-def load_results_for_wilcoxon(directories, csv_filename, learning_rates=None, batch_sizes=None):
-    """Load all individual results for Wilcoxon test"""
+def load_results_for_ttest(directories, csv_filename, learning_rates=None, batch_sizes=None):
+    """Load all individual results for t-test"""
     auc_results = {bs: {lr: [] for lr in learning_rates} for bs in batch_sizes}
     
     for directory in directories:
@@ -97,16 +133,16 @@ def build_directories(base_dir, learning_rates, batch_sizes, nodes):
 
     return directories
 
-def create_triple_heatmap(comparison, metric='auc'):
+def create_triple_heatmap(comparison, metric, n_training_samples, n_test_samples):
     learning_rates = [0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1]
     batch_sizes = [8, 16, 32, 64, 128, 256, 512]
     
     conf1_dirs = [os.path.join(comparison['dir1'], d) for d in build_directories(comparison['dir1'], learning_rates, batch_sizes, comparison['node1'])]
     conf2_dirs = [os.path.join(comparison['dir2'], d) for d in build_directories(comparison['dir2'], learning_rates, batch_sizes, comparison['node2'])]
     
-    # Load individual results for Wilcoxon test
-    conf1_individual = load_results_for_wilcoxon(conf1_dirs, comparison['file1'], learning_rates, batch_sizes)
-    conf2_individual = load_results_for_wilcoxon(conf2_dirs, comparison['file2'], learning_rates, batch_sizes)
+    # Load individual results for t-test
+    conf1_individual = load_results_for_ttest(conf1_dirs, comparison['file1'], learning_rates, batch_sizes)
+    conf2_individual = load_results_for_ttest(conf2_dirs, comparison['file2'], learning_rates, batch_sizes)
     
     # Load mean results for display
     conf1_mean = load_mean_results(conf1_dirs, comparison['file1'], learning_rates, batch_sizes)
@@ -130,15 +166,21 @@ def create_triple_heatmap(comparison, metric='auc'):
             conf2_values[i, j] = conf2_matrix[bs][lr]
             delta_values[i, j] = conf1_values[i, j] - conf2_values[i, j]
             
-            # Calculate Wilcoxon p-value if we have individual data
+            # Calculate corrected dependent t-test p-value if we have individual data
             conf1_vals = conf1_individual[bs][lr]
             conf2_vals = conf2_individual[bs][lr]
             
             if len(conf1_vals) > 1 and len(conf2_vals) > 1 and len(conf1_vals) == len(conf2_vals):
                 try:
-                    _, p_val = wilcoxon(conf1_vals, conf2_vals)
+                    _, p_val = nadeau_bengio_corrected_ttest(
+                        conf1_vals,
+                        conf2_vals,
+                        n_training_samples,
+                        n_test_samples
+                    )
                     p_values[i, j] = p_val
-                except:
+                except Exception as e:
+                    print(f"Error in t-test for bs={bs}, lr={lr}: {e}")
                     p_values[i, j] = np.nan
             else:
                 p_values[i, j] = np.nan
@@ -147,11 +189,19 @@ def create_triple_heatmap(comparison, metric='auc'):
     max_A_indices = np.where(conf1_values == np.max(conf1_values))
     max_B_indices = np.where(conf2_values == np.max(conf2_values))
     max_delta_indices = np.where(delta_values == np.max(delta_values))
+    
     # Create colormaps for each section
-    cmap_A = 'RdYlGn'
-    cmap_B = 'RdYlGn'
-    vmin_A, vmax_A = 0.3, 1
-    vmin_B, vmax_B = 0.3, 1
+    colors = [
+        "#ffc6ba",  # 1
+        "#ffd479",  # 2
+        "#ffff66",  # 3
+        "#a5db6f",  # 4
+        "#7288cd"   # 5
+    ]
+    cmap_A = LinearSegmentedColormap.from_list("my_custom_cmap", colors)
+    cmap_B = LinearSegmentedColormap.from_list("my_custom_cmap", colors)
+    vmin_A, vmax_A = conf1_values.max() - 0.1, conf1_values.max()
+    vmin_B, vmax_B = conf2_values.max() - 0.1, conf2_values.max()
 
     cmap_delta = mcolors.ListedColormap(["#8b0000", "#ff4500", "#ffff66", "#66ff66", "#006400"])
     norm_delta = mcolors.BoundaryNorm([-1, -0.05, -0.01, 0.01, 0.05, 1], cmap_delta.N)
@@ -255,6 +305,7 @@ def create_triple_heatmap(comparison, metric='auc'):
     # Title
     exp = comparison['exp']
     plt.title(f'{metric_title} Triple Heatmap Comparison: {exp}\n' +
+            f'Corrected Dependent t-test (train={n_training_samples}, test={n_test_samples})\n' +
             '(Each cell divided into: Top=A, Middle=B, Bottom=Δ with p-value)', 
             fontsize=16, pad=20)
     
@@ -270,7 +321,12 @@ def create_triple_heatmap(comparison, metric='auc'):
 def try_plot_triple_comparison(comparison):
     """Wrapper function with error handling"""
     try:
-        create_triple_heatmap(comparison, metric='auc')
+        create_triple_heatmap(
+            comparison,
+            metric='auc',
+            n_training_samples=comparison['n_training_samples'],
+            n_test_samples=comparison['n_test_samples']
+        )
     except Exception as e:
         print(f"An error occurred while plotting triple comparison for {comparison['exp']}: {e}")
         import traceback
@@ -287,7 +343,9 @@ if __name__ == "__main__":
             'node1': 2,
             'dir2': '/home/swarm-learning/repos/SLOST-local/results/heatmap_experiments_1000rows_2nodes',
             'file2': 'swarm_results.csv',
-            'node2': 2
+            'node2': 2,
+            'n_training_samples': 2000,
+            'n_test_samples': 10000
         },
         {
             'exp': 'SLOST_NVFLARE_A = Swarm 2 nodes NVFlare (2000 rows/node) vs B = Swarm 2 nodes SLOST (2000 rows/node)',
@@ -296,7 +354,9 @@ if __name__ == "__main__":
             'node1': 2,
             'dir2': '/home/swarm-learning/repos/SLOST-local/results/heatmap_experiments_2000rows_2nodes',
             'file2': 'swarm_results.csv',
-            'node2': 2
+            'node2': 2,
+            'n_training_samples': 4000,
+            'n_test_samples': 10000
         },
         {
             'exp': 'SLOST_NVFLARE_A = Swarm 2 nodes NVFlare (4000 rows/node) vs B = Swarm 2 nodes SLOST (4000 rows/node)',
@@ -305,7 +365,9 @@ if __name__ == "__main__":
             'node1': 2,
             'dir2': '/home/swarm-learning/repos/SLOST-local/results/heatmap_experiments_4000rows_2nodes',
             'file2': 'swarm_results.csv',
-            'node2': 2
+            'node2': 2,
+            'n_training_samples': 8000,
+            'n_test_samples': 10000
         },
         {
             'exp': 'SLOST_NVFLARE_A = Swarm 5 nodes NVFlare (1000 rows/node) vs B = Swarm 5 nodes SLOST (1000 rows/node)',
@@ -314,7 +376,9 @@ if __name__ == "__main__":
             'node1': 5,
             'dir2': '/home/swarm-learning/repos/SLOST-local/results/heatmap_experiments_1000rows_5nodes',
             'file2': 'swarm_results.csv',
-            'node2': 5
+            'node2': 5,
+            'n_training_samples': 5000,
+            'n_test_samples': 10000
         },
         {
             'exp': 'SLOST_NVFLARE_A = Swarm 5 nodes NVFlare (2000 rows/node) vs B = Swarm 5 nodes SLOST (2000 rows/node)',
@@ -323,7 +387,9 @@ if __name__ == "__main__":
             'node1': 5,
             'dir2': '/home/swarm-learning/repos/SLOST-local/results/heatmap_experiments_2000rows_5nodes',
             'file2': 'swarm_results.csv',
-            'node2': 5
+            'node2': 5,
+            'n_training_samples': 10000,
+            'n_test_samples': 10000
         },
         {
             'exp': 'SLOST_NVFLARE_A = Swarm 5 nodes NVFlare (4000 rows/node) vs B = Swarm 5 nodes SLOST (4000 rows/node)',
@@ -332,7 +398,9 @@ if __name__ == "__main__":
             'node1': 5,
             'dir2': '/home/swarm-learning/repos/SLOST-local/results/heatmap_experiments_4000rows_5nodes',
             'file2': 'swarm_results.csv',
-            'node2': 5
+            'node2': 5,
+            'n_training_samples': 20000,
+            'n_test_samples': 10000
         },
         {
             'exp': 'SLOST_NVFLARE_A = Swarm 4 nodes NVFlare (entire mimic iii) vs B = Swarm 4 nodes SLOST (entire mimic iii)',
@@ -341,7 +409,9 @@ if __name__ == "__main__":
             'node1': 4,
             'dir2': '/home/swarm-learning/repos/SLOST-local/results/heatmap_experiments_4nodes_iii',
             'file2': 'swarm_results.csv',
-            'node2': 4
+            'node2': 4,
+            'n_training_samples': 12300,
+            'n_test_samples': 5271
         },
         {
             'exp': 'SLOST_NVFLARE_A = Swarm 4 nodes NVFlare (entire mimic iv) vs B = Swarm 4 nodes SLOST (entire mimic iv)',
@@ -350,7 +420,9 @@ if __name__ == "__main__":
             'node1': 4,
             'dir2': '/home/swarm-learning/repos/SLOST-local/results/heatmap_experiments_4nodes_iv',
             'file2': 'swarm_results.csv',
-            'node2': 4
+            'node2': 4,
+            'n_training_samples': 35772,
+            'n_test_samples': 15330
         },
         # 2 nodes
         {
@@ -360,7 +432,9 @@ if __name__ == "__main__":
             'node1': 2,
             'dir2': 'results/heatmap_experiments_1000rows_2nodes',
             'file2': 'central_results.csv',
-            'node2': 2
+            'node2': 2,
+            'n_training_samples': 2000,
+            'n_test_samples': 10000
         },
         {
             'exp': 'A = Swarm 2 nodes (2000 rows/node) vs B = Centralized (4000 rows)',
@@ -369,7 +443,9 @@ if __name__ == "__main__":
             'node1': 2,
             'dir2': 'results/heatmap_experiments_2000rows_2nodes',
             'file2': 'central_results.csv',
-            'node2': 2
+            'node2': 2,
+            'n_training_samples': 4000,
+            'n_test_samples': 10000
         },
         {
             'exp': 'A = Swarm 2 nodes (4000 rows/node) vs B = Centralized (8000 rows)',
@@ -378,7 +454,9 @@ if __name__ == "__main__":
             'node1': 2,
             'dir2': 'results/heatmap_experiments_4000rows_2nodes',
             'file2': 'central_results.csv',
-            'node2': 2
+            'node2': 2,
+            'n_training_samples': 8000,
+            'n_test_samples': 10000
         },
         # 5 nodes
         {
@@ -388,7 +466,9 @@ if __name__ == "__main__":
             'node1': 5,
             'dir2': 'results/heatmap_experiments_1000rows_5nodes',
             'file2': 'central_results.csv',
-            'node2': 5
+            'node2': 5,
+            'n_training_samples': 5000,
+            'n_test_samples': 10000
         },
         {
             'exp': 'A = Swarm 5 nodes (2000 rows/node) vs B = Centralized (10000 rows)',
@@ -397,7 +477,9 @@ if __name__ == "__main__":
             'node1': 5,
             'dir2': 'results/heatmap_experiments_2000rows_5nodes',
             'file2': 'central_results.csv',
-            'node2': 5
+            'node2': 5,
+            'n_training_samples': 10000,
+            'n_test_samples': 10000
         },
         {
             'exp': 'A = Swarm 5 nodes (4000 rows/node) vs B = Centralized (20000 rows)',
@@ -406,7 +488,9 @@ if __name__ == "__main__":
             'node1': 5,
             'dir2': 'results/heatmap_experiments_4000rows_5nodes',
             'file2': 'central_results.csv',
-            'node2': 5
+            'node2': 5,
+            'n_training_samples': 20000,
+            'n_test_samples': 10000
         },
         # entire datasets
         {
@@ -416,7 +500,9 @@ if __name__ == "__main__":
             'node1': 4,
             'dir2': 'results/heatmap_experiments_4nodes_iii',
             'file2': 'central_results.csv',
-            'node2': 4
+            'node2': 4,
+            'n_training_samples': 12300,
+            'n_test_samples': 5271
         },
         {
             'exp': 'A = Swarm 4 nodes vs B = Centralized (entire mimic iv)',
@@ -425,7 +511,9 @@ if __name__ == "__main__":
             'node1': 4,
             'dir2': 'results/heatmap_experiments_4nodes_iv',
             'file2': 'central_results.csv',
-            'node2': 4
+            'node2': 4,
+            'n_training_samples': 35772,
+            'n_test_samples': 15330
         }
     ]
     
