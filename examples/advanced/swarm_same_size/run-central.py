@@ -8,8 +8,7 @@ Usage:
 
 Example:
     python run-central.py 5 10nodes 3 0.0025 512
-    -> Merges node1_3.csv .. node5_3.csv from datasets/mimic_iv/mimiciv_same_size/10nodes/
-       trains one centralized model, evaluates on test set.
+    -> Merges node1_3.csv .. node5_3.csv from datasets/mimic_iv/mimiciv_same_size/10nodes/ trains one centralized model, evaluates on test set.
 """
 
 import os
@@ -38,14 +37,10 @@ def get_net(input_dim):
     kernel_init = tf.keras.initializers.GlorotUniform(seed=SEED)
     bias_init = tf.keras.initializers.Zeros()
     model = tf.keras.Sequential([
-        tf.keras.layers.Dense(16, activation="relu", input_shape=(input_dim,),
-                              kernel_initializer=kernel_init, bias_initializer=bias_init),
-        tf.keras.layers.Dense(16, activation="relu",
-                              kernel_initializer=kernel_init, bias_initializer=bias_init),
-        tf.keras.layers.Dense(16, activation="relu",
-                              kernel_initializer=kernel_init, bias_initializer=bias_init),
-        tf.keras.layers.Dense(1, activation="sigmoid",
-                              kernel_initializer=kernel_init, bias_initializer=bias_init),
+        tf.keras.layers.Dense(16, activation="relu", input_shape=(input_dim,), kernel_initializer=kernel_init, bias_initializer=bias_init),
+        tf.keras.layers.Dense(16, activation="relu", kernel_initializer=kernel_init, bias_initializer=bias_init),
+        tf.keras.layers.Dense(16, activation="relu", kernel_initializer=kernel_init, bias_initializer=bias_init),
+        tf.keras.layers.Dense(1, activation="sigmoid", kernel_initializer=kernel_init, bias_initializer=bias_init),
     ])
     return model
 
@@ -118,8 +113,7 @@ def main():
     X_train = merged_df.iloc[:, :-1].values.astype(np.float32)
     y_train = merged_df.iloc[:, -1].values.astype(np.float32)
 
-    print(f"[Central] Config={configuration} Nodes={num_nodes} Iter={iteration} "
-          f"TrainSize={len(X_train)} LR={lr} BS={bs}")
+    print(f"[Central] Config={configuration} Nodes={num_nodes} Iter={iteration} TrainSize={len(X_train)} LR={lr} BS={bs}")
 
     # Build and compile model
     tf.keras.backend.clear_session()
@@ -157,8 +151,7 @@ def main():
     }
 
     results_df = pd.concat([results_df, pd.DataFrame([new_row])], ignore_index=True)
-    print(f"  -> AUC={metrics['auc']:.4f}  AUPRC={metrics['auprc']:.4f}  "
-          f"Acc={metrics['accuracy']:.4f}  Loss={metrics['loss']:.4f}")
+    print(f"  -> AUC={metrics['auc']:.4f}  AUPRC={metrics['auprc']:.4f} Acc={metrics['accuracy']:.4f}  Loss={metrics['loss']:.4f}")
 
     # Save results
     results_df.to_csv(results_file, index=False)

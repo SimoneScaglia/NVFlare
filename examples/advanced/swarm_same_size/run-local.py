@@ -8,12 +8,10 @@ Usage:
 
 Example:
     python run-local.py 5 10nodes 3 0.0025 512
-    -> Trains 5 independent local models using node1_3.csv .. node5_3.csv
-       from datasets/mimic_iv/mimiciv_same_size/10nodes/
+    -> Trains 5 independent local models using node1_3.csv .. node5_3.csv from datasets/mimic_iv/mimiciv_same_size/10nodes/
 """
 
 import os
-import sys
 import argparse
 import pandas as pd
 import numpy as np
@@ -21,8 +19,6 @@ import random
 from datetime import datetime
 
 import tensorflow as tf
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score, precision_score, recall_score
 
 # Reproducibility
 SEED = 42
@@ -40,14 +36,10 @@ def get_net(input_dim):
     kernel_init = tf.keras.initializers.GlorotUniform(seed=SEED)
     bias_init = tf.keras.initializers.Zeros()
     model = tf.keras.Sequential([
-        tf.keras.layers.Dense(16, activation="relu", input_shape=(input_dim,),
-                              kernel_initializer=kernel_init, bias_initializer=bias_init),
-        tf.keras.layers.Dense(16, activation="relu",
-                              kernel_initializer=kernel_init, bias_initializer=bias_init),
-        tf.keras.layers.Dense(16, activation="relu",
-                              kernel_initializer=kernel_init, bias_initializer=bias_init),
-        tf.keras.layers.Dense(1, activation="sigmoid",
-                              kernel_initializer=kernel_init, bias_initializer=bias_init),
+        tf.keras.layers.Dense(16, activation="relu", input_shape=(input_dim,), kernel_initializer=kernel_init, bias_initializer=bias_init),
+        tf.keras.layers.Dense(16, activation="relu", kernel_initializer=kernel_init, bias_initializer=bias_init),
+        tf.keras.layers.Dense(16, activation="relu", kernel_initializer=kernel_init, bias_initializer=bias_init),
+        tf.keras.layers.Dense(1, activation="sigmoid", kernel_initializer=kernel_init, bias_initializer=bias_init),
     ])
     return model
 
@@ -154,8 +146,7 @@ def main():
         }
 
         results_df = pd.concat([results_df, pd.DataFrame([new_row])], ignore_index=True)
-        print(f"  -> AUC={metrics['auc']:.4f}  AUPRC={metrics['auprc']:.4f}  "
-              f"Acc={metrics['accuracy']:.4f}  Loss={metrics['loss']:.4f}")
+        print(f"  -> AUC={metrics['auc']:.4f}  AUPRC={metrics['auprc']:.4f} Acc={metrics['accuracy']:.4f}  Loss={metrics['loss']:.4f}")
 
     # Save results
     results_df.to_csv(results_file, index=False)

@@ -27,6 +27,9 @@ from datetime import datetime
 
 import tensorflow as tf
 
+sys.path.append(os.path.join(os.path.dirname(__file__), '../mimic/networks'))
+from mimic_nets import FCN
+
 # Reproducibility
 SEED = 42
 random.seed(SEED)
@@ -109,22 +112,6 @@ def copy_data_files(data_dir, configuration, num_nodes, iteration):
             print(f"WARNING: {src} does not exist!")
 
 
-def get_net(input_dim):
-    """Build the FCN model (same architecture as mimic_nets.py)."""
-    kernel_init = tf.keras.initializers.GlorotUniform(seed=SEED)
-    bias_init = tf.keras.initializers.Zeros()
-    return tf.keras.Sequential([
-        tf.keras.layers.Dense(16, activation="relu", input_shape=(input_dim,),
-                              kernel_initializer=kernel_init, bias_initializer=bias_init),
-        tf.keras.layers.Dense(16, activation="relu",
-                              kernel_initializer=kernel_init, bias_initializer=bias_init),
-        tf.keras.layers.Dense(16, activation="relu",
-                              kernel_initializer=kernel_init, bias_initializer=bias_init),
-        tf.keras.layers.Dense(1, activation="sigmoid",
-                              kernel_initializer=kernel_init, bias_initializer=bias_init),
-    ])
-
-
 def get_metrics_fns():
     return [
         tf.keras.metrics.AUC(name='auc', curve='ROC', num_thresholds=1000),
@@ -166,10 +153,7 @@ def evaluate_swarm_models(test_path, num_nodes, configuration, iteration, lr, bs
     models_path = f"/tmp/nvflare/{job_name}"
 
     for j in range(1, num_nodes + 1):
-        model_path = os.path.join(
-            models_path, f'site-{j}', 'simulate_job',
-            f'app_site-{j}', f'site-{j}.weights.h5'
-        )
+        model_path = os.path.join(models_path, f'site-{j}', 'simulate_job', f'app_site-{j}', f'site-{j}.weights.h5')
 
         if not os.path.exists(model_path):
             print(f"Model not found: {model_path}")
@@ -177,7 +161,7 @@ def evaluate_swarm_models(test_path, num_nodes, configuration, iteration, lr, bs
 
         try:
             tf.keras.backend.clear_session()
-            model = get_net(input_dim)
+            model = FCN(input_dim=input_dim)
             model.build((None, input_dim))
             model.load_weights(model_path)
             model.compile(
@@ -235,8 +219,7 @@ def main():
     test_path = os.path.join(swarm_same_size_dir, "datasets", "mimic_iv", "test.csv")
 
     print(f"\n{'='*60}")
-    print(f"Swarm Experiment: Config={configuration} Nodes={num_nodes} "
-          f"Iter={iteration} LR={lr} BS={bs}")
+    print(f"Swarm Experiment: Config={configuration} Nodes={num_nodes} Iter={iteration} LR={lr} BS={bs}")
     print(f"{'='*60}")
     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - Starting")
 
@@ -258,13 +241,11 @@ def main():
     # 4. Create NVFlare job
     job_name = f"mimic_swarm_{num_nodes}"
     print(f"\nCreating NVFlare job: {job_name}")
-    run_command(f"nvflare job create -j ./jobs/{job_name} "
-                f"-w swarm_cse_tf_model_learner -sd ./code -force")
+    run_command(f"nvflare job create -j ./jobs/{job_name} -w swarm_cse_tf_model_learner -sd ./code -force")
 
     # 5. Run NVFlare simulator
     print(f"\nRunning NVFlare simulator with {num_nodes} clients")
-    run_command(f"nvflare simulator ./jobs/{job_name} "
-                f"-w /tmp/nvflare/{job_name} -n {num_nodes} -t {num_nodes}")
+    run_command(f"nvflare simulator ./jobs/{job_name} -w /tmp/nvflare/{job_name} -n {num_nodes} -t {num_nodes}")
 
     # 6. Evaluate global models and save metrics
     print("\nEvaluating swarm models...")

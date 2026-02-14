@@ -14,7 +14,7 @@ def create_config_files(base_dir, learning_rates, batch_sizes, iterations=5):
             "5": 20.0
         },
         "min_responses_for_aggregation": 5,
-        "num_aggregation_rounds": 5,
+        "num_aggregation_rounds": 5, # 50 for epochs
         "aggregation_per_epoch": 5,
         "network_file": "src/nets/net_basic.py",
         "hyperparameters": {

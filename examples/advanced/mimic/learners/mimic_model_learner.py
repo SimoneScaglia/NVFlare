@@ -79,6 +79,11 @@ class MimicModelLearner(ModelLearner):
         self.train_loader = None
         self.valid_loader = None
 
+    # def _save_epoch_weights(self, epoch_number: int):
+    #     """Persist weights for the given epoch in the app_root directory."""
+    #     epoch_file = os.path.join(self.app_root, f"{self.site_name}_epoch_{epoch_number}.weights.h5")
+    #     self.model.save_weights(epoch_file)
+
     def initialize(self):
         """Initialization of model, optimizer, loss function, etc."""
         self.info(f"Client {self.site_name} initialized at \n {self.app_root} \n with args: {self.args}")
@@ -159,6 +164,9 @@ class MimicModelLearner(ModelLearner):
                     self.best_auc = auc
                     self.save_model(is_best=True)
 
+            # # Save weights after every epoch to enable post-epoch evaluation
+            # self._save_epoch_weights(self.epoch_global + 1)
+
     def save_model(self, is_best=False):
         """Save model weights in HDF5 format"""
         file_path = self.best_local_model_file if is_best else self.local_model_file
@@ -171,6 +179,10 @@ class MimicModelLearner(ModelLearner):
         # Get round information
         self.info(f"Current/Total Round: {self.current_round + 1}/{self.total_rounds}")
         self.info(f"Client identity: {self.site_name}")
+
+        # # Set the global epoch offset so per-epoch saves use global indexing
+        # # Global epoch numbering starts at 1, so we add +1 when saving
+        # self.epoch_of_start_time = self.current_round * self.aggregation_epochs
 
         # Update local model weights with received weights
         global_weights = model.params

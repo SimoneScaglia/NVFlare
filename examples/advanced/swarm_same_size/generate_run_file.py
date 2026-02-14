@@ -50,7 +50,7 @@ with open(local_path, "w") as f:
         for num_nodes in range(2, max_nodes + 1):
             for iteration in range(NUM_ITERATIONS):
                 f.write(
-                    f'python3 "$SCRIPT_DIR/run-local.py" '
+                    f'python3 -u "$SCRIPT_DIR/run-local.py" '
                     f'{num_nodes} {config_name} {iteration} {lr} {bs}\n'
                 )
         f.write("\n")
@@ -73,7 +73,7 @@ with open(central_path, "w") as f:
         for num_nodes in range(2, max_nodes + 1):
             for iteration in range(NUM_ITERATIONS):
                 f.write(
-                    f'python3 "$SCRIPT_DIR/run-central.py" '
+                    f'python3 -u "$SCRIPT_DIR/run-central.py" '
                     f'{num_nodes} {config_name} {iteration} {lr} {bs}\n'
                 )
         f.write("\n")
@@ -101,7 +101,7 @@ with open(swarm_path, "w") as f:
         for num_nodes in range(2, max_nodes + 1):
             for iteration in range(NUM_ITERATIONS):
                 f.write(
-                    f'python3 "$SWARM_SCRIPT" '
+                    f'python3 -u "$SWARM_SCRIPT" '
                     f'{num_nodes} {config_name} {iteration} {lr} {bs}\n'
                 )
         f.write("\n")
