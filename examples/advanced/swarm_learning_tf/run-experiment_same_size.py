@@ -129,7 +129,7 @@ def evaluate_swarm_models(test_path, num_nodes, configuration, iteration, lr, bs
         os.path.dirname(os.path.abspath(__file__)),
         "..", "swarm_same_size"
     )
-    results_dir = os.path.join(swarm_same_size_dir, "results")
+    results_dir = os.path.join(swarm_same_size_dir, "results", "mimic_iii")
     os.makedirs(results_dir, exist_ok=True)
     results_file = os.path.join(results_dir, "swarm_results.csv")
 
@@ -215,8 +215,8 @@ def main():
 
     # Data directory (relative to swarm_same_size)
     swarm_same_size_dir = os.path.join(script_dir, "..", "swarm_same_size")
-    data_dir = os.path.join(swarm_same_size_dir, "datasets", "mimic_iv", "mimiciv_same_size", configuration)
-    test_path = os.path.join(swarm_same_size_dir, "datasets", "mimic_iv", "test.csv")
+    data_dir = os.path.join(swarm_same_size_dir, "datasets", "mimic_iii", "same_size", configuration)
+    test_path = os.path.join(swarm_same_size_dir, "datasets", "mimic_iii", "test.csv")
 
     print(f"\n{'='*60}")
     print(f"Swarm Experiment: Config={configuration} Nodes={num_nodes} Iter={iteration} LR={lr} BS={bs}")

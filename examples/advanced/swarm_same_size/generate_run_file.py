@@ -24,10 +24,10 @@ import os
 
 # ── Configuration ──────────────────────────────────────────────────────
 CONFIGS = {
-    "10nodes": {"max_nodes": 10, "lr": 0.0025,   "bs": 512},
-    "20nodes": {"max_nodes": 20, "lr": 0.00025,  "bs": 16},
-    "40nodes": {"max_nodes": 40, "lr": 0.005,    "bs": 512},
-    "80nodes": {"max_nodes": 80, "lr": 0.01,     "bs": 512},
+    "10nodes": {"max_nodes": 10, "lr": 0.00025,   "bs": 8},
+    "20nodes": {"max_nodes": 20, "lr": 0.00250,  "bs": 128},
+    "40nodes": {"max_nodes": 40, "lr": 0.01,    "bs": 512},
+    "80nodes": {"max_nodes": 80, "lr": 0.005,     "bs": 128},
 }
 
 NUM_ITERATIONS = 10  # iterations 0..9

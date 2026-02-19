@@ -72,11 +72,11 @@ def main():
     epochs = 25
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    data_dir = os.path.join(script_dir, "datasets", "mimic_iv", "mimiciv_same_size", configuration)
-    test_path = os.path.join(script_dir, "datasets", "mimic_iv", "test.csv")
+    data_dir = os.path.join(script_dir, "datasets", "mimic_iii", "same_size", configuration)
+    test_path = os.path.join(script_dir, "datasets", "mimic_iii", "test.csv")
 
     # Results file
-    results_dir = os.path.join(script_dir, "results")
+    results_dir = os.path.join(script_dir, "results", "mimic_iii")
     os.makedirs(results_dir, exist_ok=True)
     results_file = os.path.join(results_dir, "central_results.csv")
 
