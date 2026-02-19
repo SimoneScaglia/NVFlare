@@ -21,7 +21,8 @@ import pytest
 from nvflare.app_common.abstract.model_learner import ModelLearner
 from nvflare.app_common.executors.model_learner_executor import ModelLearnerExecutor
 from nvflare.app_common.workflows.fedavg import FedAvg
-from nvflare.job_config.api import FedJob
+from nvflare.job_config.api import FedApp, FedJob
+from nvflare.job_config.fed_app_config import ClientAppConfig
 
 
 class TestFedJob:
@@ -40,7 +41,7 @@ class TestFedJob:
         job = FedJob()
         component = FedAvg()
         with pytest.raises(Exception):
-            job.to(component, None)
+            job.to(component, None)  # type: ignore[arg-type]  # intentionally testing invalid input
 
     def test_add_params_functionality(self):
         """Test that add_params functionality works correctly."""
@@ -89,3 +90,140 @@ class TestFedJob:
             for key, value in client_params.items():
                 assert key in client_config
                 assert client_config[key] == value
+
+
+class TestFedAppAddResource:
+    """Test FedApp._add_resource() method for handling different resource types."""
+
+    def setup_method(self):
+        self.app = FedApp(ClientAppConfig())
+
+    def test_add_resource_existing_file(self):
+        """Test adding an existing file as resource."""
+        with tempfile.NamedTemporaryFile(suffix=".py", delete=False) as f:
+            f.write(b"# test script")
+            temp_path = f.name
+
+        try:
+            self.app._add_resource(temp_path)
+            assert temp_path in self.app.app_config.ext_scripts
+        finally:
+            os.unlink(temp_path)
+
+    def test_add_resource_existing_directory(self):
+        """Test adding an existing directory as resource."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self.app._add_resource(temp_dir)
+            assert temp_dir in self.app.app_config.ext_dirs
+
+    def test_add_resource_absolute_path_not_exists(self):
+        """Test adding an absolute path that doesn't exist locally.
+
+        This simulates pre-installed scripts in production environments.
+        The resource should be added without error; validation happens later in deploy().
+        """
+        non_existent_abs_path = "/preinstalled/scripts/remote_train.py"
+        self.app._add_resource(non_existent_abs_path)
+        assert non_existent_abs_path in self.app.app_config.ext_scripts
+
+    def test_add_resource_relative_path_not_exists_raises_error(self):
+        """Test that adding a non-existent relative path raises an error."""
+        non_existent_rel_path = "scripts/does_not_exist.py"
+        with pytest.raises(ValueError, match="it must be either a directory or file"):
+            self.app._add_resource(non_existent_rel_path)
+
+    def test_add_resource_invalid_type_raises_error(self):
+        """Test that adding a non-string resource raises an error."""
+        with pytest.raises(ValueError, match="resource must be a str"):
+            self.app._add_resource(123)  # type: ignore[arg-type]  # intentionally testing invalid input
+
+
+class TestBaseFedJobFileToMethods:
+    """Tests for add_file_to_* methods in BaseFedJob."""
+
+    def test_add_file_to_server(self):
+        """Test adding a file to server app custom directory."""
+        job = FedJob(name="test_job")
+        with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
+            temp_file = f.name
+        try:
+            job.add_file_to_server(temp_file)
+            # Verify server app was created and file was added
+            assert "server" in job._deploy_map
+            server_app = job._deploy_map["server"]
+            # file_sources is list of tuples (path, dest_dir, rename)
+            assert any(temp_file == src[0] for src in server_app.app_config.file_sources)
+        finally:
+            os.unlink(temp_file)
+
+    def test_add_file_to_server_with_dest_dir(self):
+        """Test adding a file to server app with custom destination directory."""
+        job = FedJob(name="test_job")
+        with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
+            temp_file = f.name
+        try:
+            job.add_file_to_server(temp_file, dest_dir="models")
+            server_app = job._deploy_map["server"]
+            # File should be added with destination directory
+            assert any(temp_file == src[0] and src[1] == "models" for src in server_app.app_config.file_sources)
+        finally:
+            os.unlink(temp_file)
+
+    def test_add_file_to_clients(self):
+        """Test adding a file to all client apps custom directory."""
+        job = FedJob(name="test_job")
+        with tempfile.NamedTemporaryFile(suffix=".py", delete=False) as f:
+            temp_file = f.name
+        try:
+            job.add_file_to_clients(temp_file)
+            # Verify all-sites client app was created and file was added
+            assert "@ALL" in job._deploy_map
+            client_app = job._deploy_map["@ALL"]
+            assert any(temp_file == src[0] for src in client_app.app_config.file_sources)
+        finally:
+            os.unlink(temp_file)
+
+    def test_add_file_to_specific_site(self):
+        """Test adding a file to a specific site."""
+        job = FedJob(name="test_job")
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            temp_file = f.name
+        try:
+            job.add_file_to(temp_file, target="site-1")
+            # Verify site-1 client app was created and file was added
+            assert "site-1" in job._deploy_map
+            site_app = job._deploy_map["site-1"]
+            assert any(temp_file == src[0] for src in site_app.app_config.file_sources)
+        finally:
+            os.unlink(temp_file)
+
+    def test_add_multiple_files_to_server(self):
+        """Test adding multiple files to server app."""
+        job = FedJob(name="test_job")
+        temp_files = []
+        try:
+            for i in range(3):
+                f = tempfile.NamedTemporaryFile(suffix=f"_{i}.pt", delete=False)
+                temp_files.append(f.name)
+                f.close()
+
+            for temp_file in temp_files:
+                job.add_file_to_server(temp_file)
+
+            server_app = job._deploy_map["server"]
+            for temp_file in temp_files:
+                assert any(temp_file == src[0] for src in server_app.app_config.file_sources)
+        finally:
+            for temp_file in temp_files:
+                os.unlink(temp_file)
+
+    def test_add_file_to_invalid_target(self):
+        """Test that invalid target raises error."""
+        job = FedJob(name="test_job")
+        with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
+            temp_file = f.name
+        try:
+            with pytest.raises(ValueError, match="target.*invalid character"):
+                job.add_file_to(temp_file, target="site@invalid")
+        finally:
+            os.unlink(temp_file)

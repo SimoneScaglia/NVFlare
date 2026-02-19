@@ -29,7 +29,7 @@ We are using `nvflare provision` to provision a hierarchical NVFlare system for 
 ***Note: if starting from scratch, please first run `nvflare provision -e` to create a project yaml, update the settings, then run the following.***
 
 ```commandline
-nvflare provision -p project.yml
+nvflare provision -s -p project.yml
 ```
 
 Note that in this example, we specify `depth: 1, width: 2` and `clients: 2`, indicating a hierarchy with a topology as following:
@@ -125,7 +125,7 @@ If you have more real devices you can adjust the number.
 #### Start the Mobile App
 To run on the real device, app developers need to integrate their applications with our edge device SDK (Android/iOS).
 
-You can get an example app from "nvflare/edge/device"
+You can get an example app from [nvflare/edge/device](../../../nvflare/edge/device/), which includes SDK implementations and example apps for both Android ([android](../../../nvflare/edge/device/android/)) and iOS ([ios](../../../nvflare/edge/device/ios/)) platforms.
 
 It can be installed on your device and started.
 
@@ -174,6 +174,20 @@ bash start_all.sh
 
 #### Step2: Generate Jobs and Submit Using the EdgeFedBuffRecipe API
 Next, let's generate job configs for cifar10 via EdgeFedBuffRecipe API.
+
+**Model Input Options:**
+The `EdgeFedBuffRecipe` accepts model input in two formats:
+- Class instance: `model=Cifar10ConvNet()` - convenient for development
+- Dict config: `model={"class_path": "models.Cifar10ConvNet", "args": {}}` - better for large models
+
+To resume from pre-trained weights, use `initial_ckpt` (absolute path on server):
+```python
+recipe = EdgeFedBuffRecipe(
+    model=Cifar10ConvNet(),
+    initial_ckpt="/server/path/to/pretrained.pt",
+    ...
+)
+```
 
 This will generate two job configurations and submit them to run on the FL system for basic synchronous and asynchronous training:
 - sync assumes ALL devices participate in each round

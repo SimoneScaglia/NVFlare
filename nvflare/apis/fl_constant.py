@@ -298,6 +298,7 @@ class ServerCommandKey(object):
     COLLECTOR = "collector"
     TURN_TO_COLD = "__turn_to_cold__"
     REASON = "reason"
+    MIN_GET_TASK_TIMEOUT = "min_get_task_timeout"
 
 
 class FedEventHeader(object):
@@ -551,6 +552,9 @@ class ConfigVarName:
 
     # SJ and CJ: per-msg timeout for streaming
     STREAMING_PER_REQUEST_TIMEOUT = "streaming_per_request_timeout"
+
+    # SJ and CJ: chunk size for downloading
+    DOWNLOAD_CHUNK_SIZE = "download_chunk_size"
 
     # SJ and CJ: min file size for streaming. If file size is less than this, it will be attached to msg directly.
     MIN_FILE_SIZE_FOR_STREAMING = "min_file_size_for_streaming"

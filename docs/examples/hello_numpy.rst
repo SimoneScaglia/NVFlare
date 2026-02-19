@@ -3,12 +3,12 @@
 Hello NumPy
 ===========
 
-This example demonstrates how to use NVIDIA FLARE with NumPy to train a simple model using federated averaging (FedAvg). The complete example code can be found in the `hello-numpy directory <examples/hello-world/hello-numpy/>`_.
+This example demonstrates how to use NVIDIA FLARE with NumPy to train a simple model using federated averaging (FedAvg). The complete example code can be found in the :github_nvflare_link:`hello-numpy directory <examples/hello-world/hello-numpy>`.
 It is recommended to create a virtual environment and run everything within a virtualenv.
 
 NVIDIA FLARE Installation
 -------------------------
-For the complete installation instructions, see `installation <../../installation.html>`_
+For the complete installation instructions, see :doc:`../installation`
 
 .. code-block:: text
 
@@ -57,31 +57,50 @@ Here for simplicity's sake, we use synthetic data that allows you to clearly see
 
 Model
 ------------------
-The ``SimpleNumpyModel`` class implements a basic neural network model using NumPy arrays.
-The model represents a simple 3x3 weight matrix that can be trained through federated learning. The model starts with fixed weights ``[[1, 2, 3], [4, 5, 6], [7, 8, 9]]`` and provides methods for training and evaluation.
+This example uses an in-script NumPy model update loop in the client code, using a simple 3x3 weight matrix to
+demonstrate aggregation behavior clearly.
 
-The model implementation is located in ``model.py``.
+See the full implementation in:
 
-
-.. literalinclude:: ../../../examples/hello-world/hello-numpy/model.py
-    :language: python
-    :linenos:
-    :caption: model.py
-    :lines: 14-
+- :github_nvflare_link:`client.py <examples/hello-world/hello-numpy/client.py>`
 
 
 
 Client Code
 ------------------
-Notice the training code follows the standard FL client pattern.
-The only difference is that we added a few lines to receive and send data to the server.
+The client training script follows the standard FL client pattern.
 
+On the client side, the training workflow is as follows:
 
-.. literalinclude:: ../../../examples/hello-world/hello-numpy/client.py
-    :language: python
-    :linenos:
-    :caption: Client Code (client.py)
-    :lines: 14-
+   1. Receive the model from the FL server
+   2. Perform training on the received global model
+   3. Send the updated model back to the FL server
+
+Using NVFlare's Client API, there are three essential methods to help achieve this workflow:
+
+   - ``flare.init()``: Initializes NVFlare Client API environment
+   - ``flare.receive()``: Receives model from the FL server
+   - ``flare.send()``: Sends the model to the FL server
+
+The following code snippet highlights how these methods are used:
+
+.. code-block:: python
+
+   import nvflare.client as flare
+
+   flare.init()  # 1. Initialize NVFlare Client API
+   input_model = flare.receive()  # 2. Receive model from server
+   params = input_model.params  # 3. Extract model parameters
+
+   # Your training code here
+   new_params = train(params)
+
+   output_model = flare.FLModel(params=new_params)  # 4. Package results
+   flare.send(output_model)  # 5. Send updated model to server
+
+For the complete implementation, see:
+
+- :github_nvflare_link:`client.py <examples/hello-world/hello-numpy/client.py>`
 
 
 Server Code
@@ -97,11 +116,26 @@ Job Recipe Code
 Job Recipe contains the client.py and built-in fedavg algorithm.
 
 
-.. literalinclude:: ../../../examples/hello-world/hello-numpy/job.py
-    :language: python
-    :linenos:
-    :caption: job recipe (job.py)
-    :lines: 14-
+See the job recipe implementation:
+
+- :github_nvflare_link:`job.py <examples/hello-world/hello-numpy/job.py>`
+
+
+Model Input Options
+^^^^^^^^^^^^^^^^^^^
+For NumPy recipes, ``model`` can be a NumPy array or list. To resume from pre-trained weights:
+
+.. code-block:: python
+
+   recipe = NumpyFedAvgRecipe(
+       model=None,  # Optional when using initial_ckpt
+       initial_ckpt="/server/path/to/model.npy",  # Absolute path
+       ...
+   )
+
+.. note::
+
+   NumPy checkpoints contain the full model data, so ``initial_ckpt`` can be used without ``model``.
 
 
 Run FL Job
@@ -126,3 +160,21 @@ Use the following command in your terminal to start the job with the specified n
 
 The full source code for this exercise can be found in
 :github_nvflare_link:`examples/hello-world/hello-numpy <examples/hello-world/hello-numpy/>`.
+
+Previous Versions of this Example
+----------------------------------
+
+For users on older versions of NVIDIA FLARE, this example had different names:
+
+**"Hello Scatter and Gather" (versions 2.0-2.4):**
+
+   - `hello-numpy-sag for 2.0 <https://github.com/NVIDIA/NVFlare/tree/2.0/examples/hello-numpy-sag>`_
+   - `hello-numpy-sag for 2.1 <https://github.com/NVIDIA/NVFlare/tree/2.1/examples/hello-numpy-sag>`_
+   - `hello-numpy-sag for 2.2 <https://github.com/NVIDIA/NVFlare/tree/2.2/examples/hello-numpy-sag>`_
+   - `hello-numpy-sag for 2.3 <https://github.com/NVIDIA/NVFlare/tree/2.3/examples/hello-world/hello-numpy-sag>`_
+   - `hello-numpy-sag for 2.4 <https://github.com/NVIDIA/NVFlare/tree/2.4/examples/hello-world/hello-numpy-sag>`_
+
+**"Hello FedAvg NumPy" (versions 2.5-2.6):**
+
+   - `hello-fedavg-numpy for 2.5 <https://github.com/NVIDIA/NVFlare/tree/2.5/examples/hello-world/hello-fedavg-numpy>`_
+   - `hello-fedavg-numpy for 2.6 <https://github.com/NVIDIA/NVFlare/tree/2.6/examples/hello-world/hello-fedavg-numpy>`_

@@ -17,12 +17,12 @@ The POC command has been reorganized in version 2.4 to have the subcommands ``pr
 .. code-block:: none
 
   nvflare poc -h
-  
+
   usage: nvflare poc [-h]  {prepare,prepare-jobs-dir,start,stop,clean} ...
-  
+
   options:
     -h, --help            show this help message and exit
-  
+
   poc:
    {prepare,prepare-jobs-dir,start,stop,clean}
                         poc subcommand
@@ -33,13 +33,13 @@ The POC command has been reorganized in version 2.4 to have the subcommands ``pr
     clean               clean up poc workspace
 
 nvflare poc prepare
--------------------
+~~~~~~~~~~~~~~~~~~~
 The detailed options for ``nvflare poc prepare``:
 
 .. code-block:: none
 
   nvflare poc prepare -h
-  
+
   usage: nvflare poc prepare [-h] [-n [NUMBER_OF_CLIENTS]] [-c [CLIENTS ...]] [-he] [-i [PROJECT_INPUT]] [-d [DOCKER_IMAGE]] [-debug]
 
   options:
@@ -56,7 +56,7 @@ The detailed options for ``nvflare poc prepare``:
     -debug, --debug       debug is on
 
 nvflare poc prepare-jobs-dir
-----------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The detailed options for ``nvflare poc prepare-jobs-dir``:
 
 .. code-block:: none
@@ -84,7 +84,7 @@ The detailed options for ``nvflare poc prepare-jobs-dir``:
 
 
 nvflare poc start
------------------
+~~~~~~~~~~~~~~~~~
 The detailed options for ``nvflare poc start``:
 
 .. code-block:: none
@@ -105,7 +105,7 @@ The detailed options for ``nvflare poc start``:
 
 
 nvflare poc stop
-----------------
+~~~~~~~~~~~~~~~~
 The detailed options for ``nvflare poc stop``:
 
 .. code-block:: none
@@ -122,7 +122,7 @@ The detailed options for ``nvflare poc stop``:
 
 
 nvflare poc clean
------------------
+~~~~~~~~~~~~~~~~~
 The detailed options for ``nvflare poc clean``:
 
 .. code-block:: none
@@ -136,7 +136,7 @@ The detailed options for ``nvflare poc clean``:
 .. _poc_workspace:
 
 Set Up POC Workspace
-====================
+--------------------
 
 Running the following command will generate the POC startup startup kits in the default workspace of "/tmp/nvflare/poc":
 
@@ -152,7 +152,7 @@ the home directory obtained from ``Path.home()`` is used to store the location o
     startup_kit {
         path = /tmp/nvflare/poc/example_project/prod_00
     }
-    
+
     poc_workspace {
         path = /tmp/nvflare/poc
     }
@@ -160,7 +160,7 @@ the home directory obtained from ``Path.home()`` is used to store the location o
 This ``config.conf`` file will be created automatically when ``nvflare poc prepare`` is first run.
 
 Replace the Default POC Workspace
----------------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 You can change the default POC workspace to any location. You can set the environment variable NVFLARE_POC_WORKSPACE::
 
@@ -192,12 +192,12 @@ or
 Note that you will need to run ``nvflare poc prepare`` again after setting the location.
 
 Start Package(s)
-================
+----------------
 Once the startup kits are generated with the prepare command, they are ready to be started. If you prepared the POC startup kits using default workspace,
 then you need to start with the same default workspace, otherwise, you need to specify the workspace.
 
 Start ALL Packages
-------------------
+~~~~~~~~~~~~~~~~~~
 Running the following command:
 
 .. code-block:: none
@@ -263,7 +263,7 @@ will start ALL clients (site-1, site-2) and server as well as FLARE Console (aka
     Trying to login, please wait ...
     Logged into server at localhost:8003 with SSID: ebc6125d-0a56-4688-9b08-355fe9e4d61a
     Type ? to list commands; type "? cmdName" to show usage of a command.
-    > 
+    >
 
 .. raw:: html
 
@@ -297,7 +297,7 @@ will start ALL clients (site-1, site-2) and server as well as FLARE Console (aka
     If you prefer to have the FLARE Console on a different terminal, you can start everything else with: ``nvflare poc start -ex admin@nvidia.com``.
 
 Start the server only
-----------------------
+~~~~~~~~~~~~~~~~~~~~~~
 
 .. code-block::
 
@@ -322,14 +322,14 @@ An example of successful output for starting a server:
     2023-07-20 16:35:50,107 - root - INFO - Server started
 
 Start the FLARE Console (previously called the Admin Client)
--------------------------------------------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: none
 
     nvflare poc start -p admin@nvidia.com
 
 Start Clients with GPU Assignment
-----------------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The user can provide the GPU device IDs in a certain order, for example:
 
@@ -359,7 +359,7 @@ If there is no GPU, then there will be no assignments. If there are GPUs, they w
            nvidia-smi --list-gpus
 
 Operating the System and Submitting a Job
-==========================================
+------------------------------------------
 After preparing the poc workspace and starting the server, clients, and console (optional), we have several options to operate the whole system.
 
 First, link the desired job directory to the admin's transfer directory:
@@ -369,24 +369,76 @@ First, link the desired job directory to the admin's transfer directory:
     nvflare poc prepare-jobs-dir -j NVFlare/examples
 
 FLARE Console
---------------
-After starting the FLARE console with:
+~~~~~~~~~~~~~~
+You can start the FLARE console with:
 
 .. code-block:: none
 
     nvflare poc start -p admin@nvidia.com
 
-Login and submit the job:
+Submitting Jobs
+~~~~~~~~~~~~~~~~~~~~~~~
+
+**For Recipe API jobs** (like hello-numpy):
+
+Recipe API jobs can be run in POC environment in two ways:
+
+**Option 1: Use PocEnv directly** (recommended):
+
+Modify your ``job.py`` to use ``PocEnv`` instead of ``SimEnv``:
+
+.. code-block:: python
+
+    # In your job.py:
+    from nvflare.recipe import PocEnv
+    from nvflare.app_common.np.recipes.fedavg import NumpyFedAvgRecipe
+
+    # Create your recipe
+    # Model can be class instance, array, or dict config
+    # For pre-trained weights: initial_ckpt="/server/path/to/model.npy"
+    recipe = NumpyFedAvgRecipe(
+        name="hello-numpy",
+        model=[[1, 2, 3], [4, 5, 6], [7, 8, 9]],
+        min_clients=2,
+        num_rounds=3,
+        train_script="client.py",
+        # ... other config
+    )
+
+    # Execute with PocEnv (runs on POC deployment)
+    env = PocEnv(num_clients=2)
+    run = recipe.execute(env)
+
+Then run: ``python job.py``
+
+**Option 2: Export and submit via FLARE Console**:
+
+If you need to use the FLARE Console's ``submit_job`` command:
+
+.. code-block:: bash
+
+    # Export the Recipe API job to traditional format
+    cd hello-world/hello-numpy
+    python job.py --export_config
+
+    # Then submit the exported job after logging in to the FLARE console
+    submit_job /tmp/nvflare/jobs/job_config/hello-numpy
+
+**For traditional jobs** (with meta.json and app/config):
 
 .. code-block:: none
 
-    submit_job hello-world/hello-numpy-sag/jobs/hello-numpy-sag
+    submit_job path/to/traditional/job
 
 Refer to :ref:`operating_nvflare` for more details.
 
 FLARE API
----------
-To programmatically operate the system and submit a job, use the :ref:`flare_api`:
+~~~~~~~~~
+To programmatically operate the system and submit a job, use the :ref:`flare_api`.
+
+**For Recipe API jobs**, using ``PocEnv`` directly is recommended (see Option 1 above).
+
+**For traditional jobs or exported Recipe jobs**, use ``submit_job()``:
 
 .. code-block:: python
 
@@ -397,22 +449,24 @@ To programmatically operate the system and submit a job, use the :ref:`flare_api
     poc_prepared = os.path.join(poc_workspace, "example_project/prod_00")
     admin_dir = os.path.join(poc_prepared, "admin@nvidia.com")
     sess = new_secure_session("admin@nvidia.com", startup_kit_location=admin_dir)
-    job_id = sess.submit_job("hello-world/hello-numpy-sag/jobs/hello-numpy-sag")
+
+    # For exported Recipe API job or traditional job
+    job_id = sess.submit_job("path/to/job")
 
     print(f"Job is running with ID {job_id}")
 
 
 Job CLI
--------
+~~~~~~~
 The :ref:`job_cli` also provides a convenient command to submit a job:
 
 .. code-block:: none
 
-    nvflare job submit -j NVFlare/examples/hello-world/hello-numpy-sag/jobs/hello-numpy-sag
+    nvflare job submit -j NVFlare/examples/hello-world/hello-numpy
 
 
 Stop Package(s)
-===============
+---------------
 
 To stop packages, issue the command:
 
@@ -429,7 +483,7 @@ Similarly, you can stop a specific package, for example:
 Note that you may need to exit the FLARE Console yourself.
 
 Clean Up
-========
+--------
 
 There is a command to clean up the POC workspace added in version 2.2 that will delete the POC workspaces:
 
@@ -438,7 +492,7 @@ There is a command to clean up the POC workspace added in version 2.2 that will 
     nvflare poc clean
 
 Learn More
-===========
+-----------
 
-To learn more about the different options of the POC command in more detail, see the 
+To learn more about the different options of the POC command in more detail, see the
 :github_nvflare_link:`Setup NVFLARE in POC Mode Tutorial <examples/tutorials/setup_poc.ipynb>`.

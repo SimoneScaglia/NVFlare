@@ -19,12 +19,11 @@ from pydantic import BaseModel
 from nvflare.apis.dxo import DataKind
 from nvflare.app_common.abstract.aggregator import Aggregator
 from nvflare.app_common.abstract.model_persistor import ModelPersistor
-from nvflare.app_common.aggregators import InTimeAccumulateWeightedAggregator
-from nvflare.app_common.shareablegenerators import FullModelShareableGenerator
-from nvflare.app_common.workflows.scatter_and_gather import ScatterAndGather
+from nvflare.app_common.workflows.fedavg import FedAvg
 from nvflare.client.config import ExchangeFormat, TransferType
+from nvflare.fuel.utils.constants import FrameworkType
 from nvflare.job_config.base_fed_job import BaseFedJob
-from nvflare.job_config.script_runner import FrameworkType, ScriptRunner
+from nvflare.job_config.script_runner import ScriptRunner
 from nvflare.recipe.spec import Recipe
 
 
@@ -33,19 +32,34 @@ class _FedAvgValidator(BaseModel):
     model_config = {"arbitrary_types_allowed": True}
 
     name: str
-    initial_model: Any
+    model: Any
+    initial_ckpt: Optional[str] = None
     min_clients: int
     num_rounds: int
     train_script: str
-    train_args: Union[str, Dict[str, str]]
-    aggregator: Optional[Aggregator]
-    aggregator_data_kind: Optional[DataKind]
+    train_args: str
+    # Legacy parameters for backward compatibility (not used by new FedAvg)
+    aggregator: Optional[Aggregator] = None
+    aggregator_data_kind: Optional[DataKind] = DataKind.WEIGHTS
+    # Core parameters
     launch_external_process: bool
     command: str
     framework: FrameworkType
     server_expected_format: ExchangeFormat
     params_transfer_type: TransferType
-    model_persistor: Optional[ModelPersistor]
+    model_persistor: Optional[ModelPersistor] = None
+    per_site_config: Optional[Dict[str, Dict]] = None
+    launch_once: bool = True
+    shutdown_timeout: float = 0.0
+    key_metric: str = "accuracy"
+    # New FedAvg features
+    stop_cond: Optional[str] = None
+    patience: Optional[int] = None
+    save_filename: str = "FL_global_model.pt"
+    exclude_vars: Optional[str] = None
+    aggregation_weights: Optional[Dict[str, float]] = None
+    # Memory management
+    server_memory_gc_rounds: int = 0
 
 
 class FedAvgRecipe(Recipe):
@@ -54,31 +68,33 @@ class FedAvgRecipe(Recipe):
     FedAvg is a fundamental federated learning algorithm that aggregates model updates
     from multiple clients by computing a weighted average based on the amount of local
     training data. This recipe sets up a complete federated learning workflow with
-    scatter-and-gather communication pattern.
+    memory-efficient InTime aggregation.
 
     The recipe configures:
     - A federated job with initial model (optional)
-    - Scatter-and-gather controller for coordinating training rounds
-    - Weighted aggregator for combining client model updates (or custom aggregator)
+    - FedAvg controller with InTime aggregation for memory efficiency
+    - Optional early stopping and model selection
     - Script runners for client-side training execution
 
     Args:
         name: Name of the federated learning job. Defaults to "fedavg".
-        initial_model: Initial model to start federated training with. Can be:
-            - nn.Module for PyTorch
-            - tf.keras.Model for TensorFlow
-            - dict for sklearn/RAW frameworks (model parameters)
-            - ModelPersistor for any framework (custom persistence logic)
-            - None (no initial model)
+        model: Initial model to start federated training with. Can be:
+            - Model instance (nn.Module, tf.keras.Model, etc.)
+            - Dict config: {"class_path": "module.ClassName", "args": {"param": value}}
+            - None: no initial model
+            For framework-specific types (nn.Module, tf.keras.Model), use the
+            corresponding framework recipe (e.g., nvflare.app_opt.pt.recipes.FedAvgRecipe).
+        initial_ckpt: Absolute path to a pre-trained checkpoint file. The file may not
+            exist locally as it could be on the server. Used to load initial weights.
         min_clients: Minimum number of clients required to start a training round.
         num_rounds: Number of federated training rounds to execute. Defaults to 2.
         train_script: Path to the training script that will be executed on each client.
-        train_args: Command line arguments to pass to the training script. Can be:
-            - str: Same arguments for all clients (uses job.to_clients)
-            - dict[str, str]: Per-client arguments mapping site names to args (uses job.to per site)
-        aggregator: Aggregator for combining client updates. If None,
-            uses InTimeAccumulateWeightedAggregator with aggregator_data_kind.
-        aggregator_data_kind: Data kind to use for the aggregator. Defaults to DataKind.WEIGHTS.
+        train_args: Command line arguments to pass to the training script.
+        aggregator: Custom aggregator (ModelAggregator) for combining client model updates.
+            Must implement accept_model(), aggregate_model(), reset_stats() methods.
+            If None, uses built-in memory-efficient weighted averaging. Defaults to None.
+        aggregator_data_kind: Data kind for aggregation (DataKind.WEIGHTS or DataKind.WEIGHT_DIFF).
+            Kept for backward compatibility. Defaults to DataKind.WEIGHTS.
         launch_external_process: Whether to launch the script in external process. Defaults to False.
         command: If launch_external_process=True, command to run script (prepended to script).
             Defaults to "python3 -u".
@@ -90,15 +106,41 @@ class FedAvgRecipe(Recipe):
             Defaults to ExchangeFormat.NUMPY.
         params_transfer_type: How to transfer the parameters. FULL means the whole model parameters
             are sent. DIFF means that only the difference is sent. Defaults to TransferType.FULL.
-        model_persistor: Custom model persistor for any framework.
-            - For PyTorch/TensorFlow: Optional (defaults will be used if not provided)
-            - For RAW frameworks: Can be provided here OR passed as initial_model
-            If None, framework-specific defaults will be used (PT/TF only).
+        model_persistor: Custom model persistor for any framework. If None, uses simple
+            file-based saving with save_filename.
+        per_site_config: Per-site configuration for the federated learning job. Dictionary mapping
+            site names to configuration dicts. Each config dict can contain optional overrides:
+            - train_script (str): Training script path
+            - train_args (str): Script arguments
+            - launch_external_process (bool): Whether to launch external process
+            - command (str): Command prefix for external process
+            - framework (FrameworkType): Framework type
+            - server_expected_format (ExchangeFormat): Exchange format
+            - params_transfer_type (TransferType): Parameter transfer type
+            - launch_once (bool): Whether to launch external process once or per task
+            - shutdown_timeout (float): Shutdown timeout in seconds
+            If not provided, the same configuration will be used for all clients.
+        launch_once: Whether the external process will be launched only once at the beginning
+            or on each task. Only used if `launch_external_process` is True. Defaults to True.
+        shutdown_timeout: If provided, will wait for this number of seconds before shutdown.
+            Only used if `launch_external_process` is True. Defaults to 0.0.
+        key_metric: Metric used to determine if the model is globally best. If validation metrics are a dict,
+            key_metric selects the metric used for global model selection by the IntimeModelSelector.
+            Defaults to "accuracy".
+        stop_cond: Early stopping condition based on metric. String literal in the format of
+            '<key> <op> <value>' (e.g. "accuracy >= 80"). If None, early stopping is disabled.
+        patience: Number of rounds with no improvement after which FL will be stopped.
+            Only applies if stop_cond is set. Defaults to None.
+        save_filename: Filename for saving the best model. Defaults to "FL_global_model.pt".
+        exclude_vars: Regex pattern for variables to exclude from aggregation.
+        aggregation_weights: Per-client aggregation weights dict. Defaults to equal weights.
+        server_memory_gc_rounds: Run memory cleanup (gc.collect + malloc_trim) every N rounds on server.
+            Set to 0 to disable. Defaults to 0.
 
     Note:
-        By default, this recipe implements the standard FedAvg algorithm where model updates
-        are aggregated using weighted averaging based on the number of training
-        samples provided by each client.
+        This recipe uses InTime (streaming) aggregation for memory efficiency - each client
+        result is aggregated immediately upon receipt rather than collecting all results first.
+        Memory usage is constant regardless of the number of clients.
 
         If you want to use a custom aggregator, you can pass it in the aggregator parameter.
         The custom aggregator must be a subclass of the Aggregator class.
@@ -108,24 +150,39 @@ class FedAvgRecipe(Recipe):
         self,
         *,
         name: str = "fedavg",
-        initial_model: Any = None,
+        model: Union[Any, Dict[str, Any], None] = None,
+        initial_ckpt: Optional[str] = None,
         min_clients: int,
         num_rounds: int = 2,
         train_script: str,
-        train_args: Union[str, Dict[str, str]] = "",
+        train_args: str = "",
+        # Legacy parameters for backward compatibility
         aggregator: Optional[Aggregator] = None,
         aggregator_data_kind: Optional[DataKind] = DataKind.WEIGHTS,
+        # Core parameters
         launch_external_process: bool = False,
         command: str = "python3 -u",
         framework: FrameworkType = FrameworkType.PYTORCH,
         server_expected_format: ExchangeFormat = ExchangeFormat.NUMPY,
         params_transfer_type: TransferType = TransferType.FULL,
         model_persistor: Optional[ModelPersistor] = None,
+        per_site_config: Optional[Dict[str, Dict]] = None,
+        launch_once: bool = True,
+        shutdown_timeout: float = 0.0,
+        key_metric: str = "accuracy",
+        # New FedAvg features
+        stop_cond: Optional[str] = None,
+        patience: Optional[int] = None,
+        save_filename: str = "FL_global_model.pt",
+        exclude_vars: Optional[str] = None,
+        aggregation_weights: Optional[Dict[str, float]] = None,
+        server_memory_gc_rounds: int = 0,
     ):
         # Validate inputs internally
         v = _FedAvgValidator(
             name=name,
-            initial_model=initial_model,
+            model=model,
+            initial_ckpt=initial_ckpt,
             min_clients=min_clients,
             num_rounds=num_rounds,
             train_script=train_script,
@@ -138,10 +195,29 @@ class FedAvgRecipe(Recipe):
             server_expected_format=server_expected_format,
             params_transfer_type=params_transfer_type,
             model_persistor=model_persistor,
+            per_site_config=per_site_config,
+            launch_once=launch_once,
+            shutdown_timeout=shutdown_timeout,
+            key_metric=key_metric,
+            stop_cond=stop_cond,
+            patience=patience,
+            save_filename=save_filename,
+            exclude_vars=exclude_vars,
+            aggregation_weights=aggregation_weights,
+            server_memory_gc_rounds=server_memory_gc_rounds,
         )
 
         self.name = v.name
-        self.initial_model = v.initial_model
+        self.model = v.model
+        self.initial_ckpt = v.initial_ckpt
+
+        # Validate inputs using shared utilities
+        from nvflare.recipe.utils import recipe_model_to_job_model, validate_ckpt
+
+        validate_ckpt(self.initial_ckpt)
+        if isinstance(self.model, dict):
+            self.model = recipe_model_to_job_model(self.model)
+
         self.min_clients = v.min_clients
         self.num_rounds = v.num_rounds
         self.train_script = v.train_script
@@ -154,66 +230,106 @@ class FedAvgRecipe(Recipe):
         self.server_expected_format = v.server_expected_format
         self.params_transfer_type = v.params_transfer_type
         self.model_persistor = v.model_persistor
+        self.per_site_config = v.per_site_config
+        self.launch_once = v.launch_once
+        self.shutdown_timeout = v.shutdown_timeout
+        self.key_metric = v.key_metric
+        self.stop_cond = v.stop_cond
+        self.patience = v.patience
+        self.save_filename = v.save_filename
+        self.exclude_vars = v.exclude_vars
+        self.aggregation_weights = v.aggregation_weights
+        self.server_memory_gc_rounds = v.server_memory_gc_rounds
 
-        # Validate RAW framework requirements
-        if self.framework == FrameworkType.RAW:
-            if self.initial_model is None and self.model_persistor is None:
-                raise ValueError(
-                    "RAW framework requires either initial_model (dict or ModelPersistor) or model_persistor. "
-                    "Consider using framework-specific wrappers (e.g., SklearnFedAvgRecipe) for convenience."
-                )
+        # Validate that we have at least one model source
+        # Note: Subclasses (e.g., sklearn) that manage models differently should pass
+        # a model or model_persistor to satisfy this check.
+        if self.model is None and self.model_persistor is None and self.initial_ckpt is None:
+            raise ValueError(
+                "Must provide either model, initial_ckpt, or model_persistor. "
+                "Cannot create a job without a model source."
+            )
 
         # Create BaseFedJob - all frameworks use it for consistency
-        # Child classes (PT/TF wrappers) can override _get_analytics_receiver() for framework-specific defaults
         job = BaseFedJob(
             name=self.name,
             min_clients=self.min_clients,
-            analytics_receiver=self._get_analytics_receiver(),
+            key_metric=self.key_metric,
         )
 
         # Setup framework-specific model components and persistor
         # Child classes (PT/TF wrappers) override this method for framework-specific logic
         persistor_id = self._setup_model_and_persistor(job)
 
-        # Setup aggregator
-        if self.aggregator is None:
-            self.aggregator = InTimeAccumulateWeightedAggregator(expected_data_kind=self.aggregator_data_kind)
-        else:
-            if not isinstance(self.aggregator, Aggregator):
-                raise ValueError(f"Invalid aggregator type: {type(self.aggregator)}. Expected type: {Aggregator}")
+        # Convert model to dict if needed (e.g., PyTorch nn.Module)
+        # Only pass to controller if no persistor is handling the model
+        # (persistor already handles initial model via PTModel/TFModel)
+        # Note: empty string "" means no persistor, so we need model_params
+        has_persistor = persistor_id != ""
+        model_params = None if has_persistor else self._get_model_params()
 
-        # Add shareable generator and aggregator
-        shareable_generator = FullModelShareableGenerator()
-        shareable_generator_id = job.to_server(shareable_generator, id="shareable_generator")
-        aggregator_id = job.to_server(self.aggregator, id="aggregator")
+        # Prepare aggregator for controller - must be ModelAggregator for FLModel-based aggregation
+        model_aggregator = self._get_model_aggregator()
 
-        # Add controller
-        controller = ScatterAndGather(
-            min_clients=self.min_clients,
+        # Add controller with InTime aggregation and all features
+        controller = FedAvg(
+            num_clients=self.min_clients,
             num_rounds=self.num_rounds,
-            wait_time_after_min_received=0,
-            aggregator_id=aggregator_id,
             persistor_id=persistor_id,
-            shareable_generator_id=shareable_generator_id,
+            model=model_params,
+            save_filename=self.save_filename,
+            aggregator=model_aggregator,
+            stop_cond=self.stop_cond,
+            patience=self.patience,
+            task_name="train",
+            exclude_vars=self.exclude_vars,
+            aggregation_weights=self.aggregation_weights,
+            memory_gc_rounds=self.server_memory_gc_rounds,
         )
         job.to_server(controller)
 
-        # Add client executors
-        if isinstance(self.train_args, dict):
-            # Per-client configuration
-            for site_name, site_args in self.train_args.items():
+        if self.per_site_config is not None:
+            for site_name, site_config in self.per_site_config.items():
+                # Use site-specific config or fall back to defaults
+                script = (
+                    site_config.get("train_script")
+                    if site_config.get("train_script") is not None
+                    else self.train_script
+                )
+                script_args = (
+                    site_config.get("train_args") if site_config.get("train_args") is not None else self.train_args
+                )
+                launch_external = (
+                    site_config.get("launch_external_process")
+                    if site_config.get("launch_external_process") is not None
+                    else self.launch_external_process
+                )
+                command = site_config.get("command") or self.command
+                framework = site_config.get("framework") or self.framework
+                expected_format = site_config.get("server_expected_format") or self.server_expected_format
+                transfer_type = site_config.get("params_transfer_type") or self.params_transfer_type
+                launch_once = (
+                    site_config.get("launch_once") if site_config.get("launch_once") is not None else self.launch_once
+                )
+                shutdown_timeout = (
+                    site_config.get("shutdown_timeout")
+                    if site_config.get("shutdown_timeout") is not None
+                    else self.shutdown_timeout
+                )
+
                 executor = ScriptRunner(
-                    script=self.train_script,
-                    script_args=site_args,
-                    launch_external_process=self.launch_external_process,
-                    command=self.command,
-                    framework=self.framework,
-                    server_expected_format=self.server_expected_format,
-                    params_transfer_type=self.params_transfer_type,
+                    script=script,
+                    script_args=script_args,
+                    launch_external_process=launch_external,
+                    command=command,
+                    framework=framework,
+                    server_expected_format=expected_format,
+                    params_transfer_type=transfer_type,
+                    launch_once=launch_once,
+                    shutdown_timeout=shutdown_timeout,
                 )
                 job.to(executor, site_name)
         else:
-            # Unified configuration
             executor = ScriptRunner(
                 script=self.train_script,
                 script_args=self.train_args,
@@ -222,24 +338,71 @@ class FedAvgRecipe(Recipe):
                 framework=self.framework,
                 server_expected_format=self.server_expected_format,
                 params_transfer_type=self.params_transfer_type,
+                launch_once=self.launch_once,
+                shutdown_timeout=self.shutdown_timeout,
             )
             job.to_clients(executor)
 
         Recipe.__init__(self, job)
 
-    def _get_analytics_receiver(self):
-        """Get the analytics receiver for this recipe.
+    def _get_model_params(self) -> Optional[Dict]:
+        """Convert model to dict of params.
+
+        Base implementation handles dict and None. Framework-specific subclasses
+        should override this to handle their model types (e.g., nn.Module, tf.keras.Model).
 
         Returns:
-            AnalyticsReceiver or None: The analytics receiver to use, or None for no analytics.
-
-        Note:
-            Child classes (PT/TF wrappers) can override this to provide framework-specific defaults.
+            Optional[Dict]: model parameters as dict, or None
         """
-        return None
+        if self.model is None:
+            return None
+
+        if isinstance(self.model, dict):
+            return self.model
+
+        # Unknown type - subclasses should override for framework-specific handling
+        raise TypeError(
+            f"model must be a dict or None for the base recipe. "
+            f"Got {type(self.model).__name__}. "
+            f"Use a framework-specific recipe (e.g., nvflare.app_opt.pt.recipes.FedAvgRecipe) "
+            f"for nn.Module or other model types."
+        )
+
+    def _get_model_aggregator(self):
+        """Get the ModelAggregator for the FedAvg controller.
+
+        The FedAvg controller expects a ModelAggregator (works with FLModel).
+        If no aggregator is provided, returns None (uses built-in weighted averaging).
+        If a ModelAggregator is provided, returns it directly.
+
+        Returns:
+            ModelAggregator or None
+        """
+        if self.aggregator is None:
+            return None
+
+        # Import here to avoid circular imports
+        from nvflare.app_common.aggregators.model_aggregator import ModelAggregator
+
+        if isinstance(self.aggregator, ModelAggregator):
+            return self.aggregator
+        else:
+            # It's a Shareable-based Aggregator - can't use directly with FedAvg
+            # Log a warning and fall back to built-in aggregation
+            import logging
+
+            logging.getLogger(__name__).warning(
+                f"Provided aggregator {type(self.aggregator).__name__} is not a ModelAggregator. "
+                "Using built-in weighted averaging instead. For custom aggregation with FedAvg, "
+                "please use a ModelAggregator subclass (e.g., from model_aggregator.py)."
+            )
+            return None
 
     def _setup_model_and_persistor(self, job: BaseFedJob) -> str:
         """Setup framework-specific model components and persistor.
+
+        Base implementation handles custom persistor. Framework-specific subclasses
+        should override this to use PTModel/TFModel for their model types.
 
         Returns:
             str: The persistor_id to be used by the controller.

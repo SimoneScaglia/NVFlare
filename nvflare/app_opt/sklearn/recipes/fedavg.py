@@ -12,26 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Dict, Optional, Union
+from typing import Optional
 
 from nvflare.apis.dxo import DataKind
 from nvflare.app_common.abstract.aggregator import Aggregator
-from nvflare.app_opt.sklearn.joblib_model_param_persistor import JoblibModelParamPersistor
+from nvflare.app_opt.sklearn.joblib_model_param_persistor import JoblibModelParamPersistor, validate_model_path
 from nvflare.client.config import ExchangeFormat, TransferType
-from nvflare.job_config.script_runner import FrameworkType
+from nvflare.fuel.utils.constants import FrameworkType
 from nvflare.recipe.fedavg import FedAvgRecipe as UnifiedFedAvgRecipe
 
 
 class SklearnFedAvgRecipe(UnifiedFedAvgRecipe):
     """A recipe for implementing Federated Averaging (FedAvg) with Scikit-learn.
 
-    This recipe sets up a complete federated learning workflow with scatter-and-gather
-    communication pattern specifically designed for scikit-learn models.
+    This recipe sets up a complete federated learning workflow with memory-efficient
+    InTime aggregation, specifically designed for scikit-learn models.
 
     The recipe configures:
     - A federated job with initial parameters
-    - Scatter-and-gather controller for coordinating training rounds
-    - Weighted aggregator for combining client model updates (or custom aggregator)
+    - FedAvg controller with InTime aggregation for memory efficiency
+    - Optional early stopping and model selection
     - Script runners for client-side training execution
 
     Args:
@@ -40,19 +40,30 @@ class SklearnFedAvgRecipe(UnifiedFedAvgRecipe):
         num_rounds: Number of federated training rounds to execute. Defaults to 2.
         model_params: Model hyperparameters as a dictionary. For SGDClassifier, can include:
             n_classes, learning_rate, eta0, loss, penalty, fit_intercept, etc.
-            Can also include initial weights if needed.
+        model_path: Optional absolute path to a saved model file (.joblib, .pkl). If provided,
+            the model is loaded from this path at runtime (file must exist). Takes precedence
+            over model_params when loading.
         train_script: Path to the training script that will be executed on each client.
-        train_args: Command line arguments to pass to the training script. Can be:
-            - str: Same arguments for all clients (uses job.to_clients)
-            - dict[str, str]: Per-client arguments mapping site names to args (uses job.to per site)
+        train_args: Command line arguments to pass to the training script.
         aggregator: Custom aggregator for combining client updates. If None,
             uses InTimeAccumulateWeightedAggregator with aggregator_data_kind.
         aggregator_data_kind: Data kind to use for the aggregator. Defaults to DataKind.WEIGHTS.
         launch_external_process: Whether to launch the script in external process. Defaults to False.
         command: If launch_external_process=True, command to run script (prepended to script).
             Defaults to "python3 -u".
+        per_site_config: Per-site configuration for the federated learning job. Dictionary mapping
+            site names to configuration dicts. If not provided, the same configuration will be used
+            for all clients.
+        key_metric: Metric used to determine if the model is globally best. If validation metrics are
+            a dict, key_metric selects the metric used for global model selection. Defaults to "accuracy".
+        launch_once: Whether the external process will be launched only once at the beginning
+            or on each task. Only used if `launch_external_process` is True. Defaults to True.
+        shutdown_timeout: If provided, will wait for this number of seconds before shutdown.
+            Only used if `launch_external_process` is True. Defaults to 0.0.
 
     Example:
+        Basic usage with same config for all clients:
+
         ```python
         recipe = SklearnFedAvgRecipe(
             name="sklearn_linear",
@@ -76,6 +87,25 @@ class SklearnFedAvgRecipe(UnifiedFedAvgRecipe):
         print("Result:", run.get_result())
         ```
 
+        Per-site configuration:
+
+        ```python
+        from nvflare.app_opt.sklearn import SklearnFedAvgRecipe
+
+        recipe = SklearnFedAvgRecipe(
+            name="sklearn_linear",
+            min_clients=3,
+            num_rounds=50,
+            model_params={"n_classes": 2, "learning_rate": "constant", "eta0": 1e-4},
+            train_script="client.py",
+            per_site_config={
+                "site-1": {"train_args": "--data_path /tmp/data/site1.csv"},
+                "site-2": {"train_args": "--data_path /tmp/data/site2.csv"},
+                "site-3": {"train_args": "--data_path /tmp/data/site3.csv"},
+            },
+        )
+        ```
+
     Note:
         By default, this recipe implements the standard FedAvg algorithm where model updates
         are aggregated using weighted averaging based on the number of training
@@ -92,15 +122,25 @@ class SklearnFedAvgRecipe(UnifiedFedAvgRecipe):
         min_clients: int,
         num_rounds: int = 2,
         model_params: Optional[dict] = None,
+        model_path: Optional[str] = None,
         train_script: str,
-        train_args: Union[str, Dict[str, str]] = "",
+        train_args: str = "",
         aggregator: Optional[Aggregator] = None,
         aggregator_data_kind: DataKind = DataKind.WEIGHTS,
         launch_external_process: bool = False,
         command: str = "python3 -u",
+        per_site_config: Optional[dict[str, dict]] = None,
+        key_metric: str = "accuracy",
+        launch_once: bool = True,
+        shutdown_timeout: float = 0.0,
     ):
+        validate_model_path(model_path)
+
         # Create sklearn-specific persistor
-        persistor = JoblibModelParamPersistor(initial_params=model_params or {})
+        persistor = JoblibModelParamPersistor(
+            initial_params=model_params or {},
+            model_path=model_path,
+        )
 
         # Call the unified FedAvgRecipe with sklearn-specific settings
         super().__init__(
@@ -117,4 +157,8 @@ class SklearnFedAvgRecipe(UnifiedFedAvgRecipe):
             server_expected_format=ExchangeFormat.RAW,  # sklearn uses RAW exchange format
             params_transfer_type=TransferType.FULL,
             model_persistor=persistor,  # Pass sklearn-specific persistor
+            per_site_config=per_site_config,
+            key_metric=key_metric,
+            launch_once=launch_once,
+            shutdown_timeout=shutdown_timeout,
         )

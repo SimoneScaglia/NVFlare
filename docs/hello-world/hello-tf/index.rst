@@ -7,7 +7,7 @@ For detailed documentation, see the `Hello TensorFlow <https://www.tensorflow.or
 
 We recommend using the `NVIDIA TensorFlow docker <https://catalog.ngc.nvidia.com/orgs/nvidia/containers/tensorflow>`_ for GPU support. If GPU is not required, a Python virtual environment is sufficient.
 
-To run this example with the FLARE API, refer to the `hello_world notebook <../hello_world.ipynb>`_.
+To run this example with the FLARE API, refer to the :github_nvflare_link:`hello_world notebook <examples/hello-world/hello_world.ipynb>`.
 
 Run NVIDIA TensorFlow Container
 -------------------------------
@@ -111,6 +111,28 @@ The job recipe includes `client.py` and the built-in FedAvg algorithm.
     :linenos:
     :caption: job recipe (job.py)
     :lines: 14-
+
+Model Input Options
+^^^^^^^^^^^^^^^^^^^
+
+The ``model`` parameter accepts two formats:
+
+1. **Class instance**: ``model=Net()`` - Convenient and Pythonic
+2. **Dict config**: ``model={"class_path": "model.Net", "args": {}}`` - Better for large models
+
+To resume from pre-trained weights:
+
+.. code-block:: python
+
+   recipe = FedAvgRecipe(
+       model=Net(),
+       initial_ckpt="/server/path/to/pretrained.h5",  # Absolute path
+       ...
+   )
+
+.. note::
+
+   For TensorFlow/Keras, SavedModel or .h5 files contain both architecture and weights, so ``initial_ckpt`` can be used without ``model``.
 
 Run the Experiment
 ------------------

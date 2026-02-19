@@ -313,6 +313,35 @@ This argument can be any of the following:
 - log level name or number (``debug``, ``info``, ``warning``, ``error``, ``critical``, ``30``)
 - For admin commands only: read the current log configuration file log_config.json from the workspace (``reload``)
 
+.. _fl_log_level_env_var:
+
+FL_LOG_LEVEL Environment Variable
+=================================
+
+The ``FL_LOG_LEVEL`` environment variable can be used to set the log configuration without passing a command-line argument or API parameter.
+It accepts the same values as the :ref:`Log Config Argument <log_config_argument>` above (``concise``, ``full``, ``verbose``, a filepath, or a log level).
+
+This environment variable is applied across all modes: simulator, POC, and production.
+
+**Precedence** (highest to lowest):
+
+1. Explicit parameter (``-l`` CLI flag or ``log_config`` API argument)
+2. ``FL_LOG_LEVEL`` environment variable
+3. Default (``concise`` for simulator CLI, workspace ``log_config.json`` for POC/production)
+
+Example usage:
+
+.. code-block:: shell
+
+    # Only show error level logs
+    FL_LOG_LEVEL=error python job.py
+
+    # Use verbose logging
+    FL_LOG_LEVEL=verbose nvflare simulator -w /tmp/nvflare/workspace -n 2 -t 2 job_folder
+
+    # Set for all NVFLARE processes in the session
+    export FL_LOG_LEVEL=error
+
 
 Simulator log configuration
 ===========================
@@ -321,13 +350,13 @@ Users can specify a log configuration in the simulator command with the ``-l`` s
 
 .. code-block:: shell
 
-    nvflare simulator -w /tmp/nvflare/hello-numpy-sag -n 2 -t 2 hello-world/hello-numpy-sag/jobs/hello-numpy-sag -l log_config.json
+    nvflare simulator -w /tmp/nvflare/hello-numpy -n 2 -t 2 hello-world/hello-numpy -l log_config.json
 
 Or using the ``log_config`` argument of the Job API simulator run:
 
 .. code-block:: python
 
-    job.simulator_run("/tmp/nvflare/hello-numpy-sag", log_config="log_config.json")
+    job.simulator_run("/tmp/nvflare/hello-numpy", log_config="log_config.json")
 
 POC log configurations
 ======================

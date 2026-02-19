@@ -17,8 +17,7 @@ and run it under different environments
 """
 import argparse
 
-from model import SimpleNumpyModel
-
+from nvflare.apis.dxo import DataKind
 from nvflare.app_common.np.recipes.fedavg import NumpyFedAvgRecipe
 from nvflare.recipe import SimEnv, add_experiment_tracking
 
@@ -27,7 +26,15 @@ def define_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("--n_clients", type=int, default=2)
     parser.add_argument("--num_rounds", type=int, default=3)
-    parser.add_argument("--learning_rate", type=float, default=1.0)
+    parser.add_argument("--update_type", type=str, default="full", choices=["full", "diff"])
+    parser.add_argument("--launch_process", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--export_config", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--log_config",
+        type=str,
+        default=None,
+        help="Log config mode ('concise', 'full', 'verbose'), filepath to a log config json file, or level (info, debug, error, etc.)",
+    )
 
     return parser.parse_args()
 
@@ -37,24 +44,33 @@ def main():
 
     n_clients = args.n_clients
     num_rounds = args.num_rounds
-    learning_rate = args.learning_rate
+    launch_process = args.launch_process
 
+    train_args = f"--update_type {args.update_type}"
     recipe = NumpyFedAvgRecipe(
         name="hello-numpy",
         min_clients=n_clients,
         num_rounds=num_rounds,
-        initial_model=SimpleNumpyModel(),
+        # Model can be array or None (if using initial_ckpt):
+        model=[[1, 2, 3], [4, 5, 6], [7, 8, 9]],
+        # For pre-trained weights: initial_ckpt="/server/path/to/model.npy",
         train_script="client.py",
-        train_args=f"--learning_rate {learning_rate}",
+        train_args=train_args,
+        launch_external_process=launch_process,
+        aggregator_data_kind=DataKind.WEIGHTS if args.update_type == "full" else DataKind.WEIGHT_DIFF,
     )
     add_experiment_tracking(recipe, tracking_type="tensorboard")
-
-    env = SimEnv(num_clients=n_clients)
-    run = recipe.execute(env)
-    print()
-    print("Result can be found in :", run.get_result())
-    print("Job Status is:", run.get_status())
-    print()
+    if args.export_config:
+        job_dir = "/tmp/nvflare/jobs/job_config"
+        recipe.export(job_dir)
+        print(f"Job config exported to {job_dir}")
+    else:
+        env = SimEnv(num_clients=n_clients, log_config=args.log_config)
+        run = recipe.execute(env)
+        print()
+        print("Result can be found in :", run.get_result())
+        print("Job Status is:", run.get_status())
+        print()
 
 
 if __name__ == "__main__":

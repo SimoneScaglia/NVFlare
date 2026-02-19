@@ -22,7 +22,6 @@ from nvflare.app_common.abstract.model_persistor import ModelPersistor
 from nvflare.app_common.widgets.convert_to_fed_event import ConvertToFedEvent
 from nvflare.app_common.widgets.streaming import AnalyticsReceiver
 from nvflare.app_common.widgets.validation_json_generator import ValidationJsonGenerator
-from nvflare.app_opt.tracking.tb.tb_receiver import TBAnalyticsReceiver
 from nvflare.job_config.base_fed_job import BaseFedJob as UnifiedBaseFedJob
 
 
@@ -36,7 +35,7 @@ class BaseFedJob(UnifiedBaseFedJob):
     User must add controllers and executors.
 
     Args:
-        initial_model (nn.Module, optional): initial PyTorch Model. Defaults to None.
+        initial_model (nn.Module, optional): Initial PyTorch model. Defaults to None.
         name (str, optional): name of the job. Defaults to "fed_job".
         min_clients (int, optional): the minimum number of clients for the job. Defaults to 1.
         mandatory_clients (list[str] | None, optional): mandatory clients to run the job. Default None.
@@ -51,8 +50,9 @@ class BaseFedJob(UnifiedBaseFedJob):
             If not provided, an IntimeModelSelector will be configured based on key_metric.
         convert_to_fed_event: (ConvertToFedEvent | None, optional): A component to convert certain events to fed events.
             if not provided, a ConvertToFedEvent object will be created.
-        analytics_receiver (bool | AnalyticsReceiver | None, optional): Receive analytics.
-            If not provided, a TBAnalyticsReceiver will be configured.
+        analytics_receiver (AnalyticsReceiver | None, optional): Component for receiving analytics data.
+            If not provided, no analytics tracking will be enabled. For experiment tracking (e.g., TensorBoard),
+            explicitly pass a TBAnalyticsReceiver instance.
         model_persistor (ModelPersistor | None, optional): how to persist the model.
         model_locator (ModelLocator | None, optional): how to locate the model.
     """
@@ -71,10 +71,6 @@ class BaseFedJob(UnifiedBaseFedJob):
         model_persistor: Optional[ModelPersistor] = None,
         model_locator: Optional[ModelLocator] = None,
     ):
-        # Add default TBAnalyticsReceiver if not provided (PyTorch-specific)
-        if analytics_receiver is None:
-            analytics_receiver = TBAnalyticsReceiver()
-
         # Call the unified BaseFedJob
         super().__init__(
             name=name,
@@ -97,12 +93,12 @@ class BaseFedJob(UnifiedBaseFedJob):
 
     def _setup_pytorch_model(
         self,
-        model: nn.Module,
+        initial_model: nn.Module,
         persistor: Optional[ModelPersistor] = None,
         locator: Optional[ModelLocator] = None,
     ):
         """Setup PyTorch model with persistor and locator."""
         from nvflare.app_opt.pt.job_config.model import PTModel
 
-        pt_model = PTModel(model=model, persistor=persistor, locator=locator)
+        pt_model = PTModel(model=initial_model, persistor=persistor, locator=locator)
         self.comp_ids.update(self.to_server(pt_model))

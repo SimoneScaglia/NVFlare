@@ -22,19 +22,13 @@ from nvflare.app_common.launchers.subprocess_launcher import SubprocessLauncher
 from nvflare.app_common.widgets.external_configurator import ExternalConfigurator
 from nvflare.app_common.widgets.metric_relay import MetricRelay
 from nvflare.client.config import ExchangeFormat, TransferType
+from nvflare.fuel.utils.constants import FrameworkType  # noqa: F401 - re-exported for backward compatibility
 from nvflare.fuel.utils.import_utils import optional_import
 from nvflare.fuel.utils.pipe.cell_pipe import CellPipe, Mode
 from nvflare.fuel.utils.pipe.pipe import Pipe
 from nvflare.fuel.utils.validation_utils import check_str
 
 from .api import FedJob, validate_object_for_job
-
-
-class FrameworkType(str, Enum):
-    RAW = "raw"
-    NUMPY = "numpy"
-    PYTORCH = "pytorch"
-    TENSORFLOW = "tensorflow"
 
 
 class PipeConnectType(str, Enum):
@@ -66,6 +60,8 @@ class BaseScriptRunner:
         metric_relay: Optional[MetricRelay] = None,
         metric_pipe: Optional[Pipe] = None,
         pipe_connect_type: str = None,
+        launch_once: bool = True,
+        shutdown_timeout: float = 0.0,
     ):
         """BaseScriptRunner is used with FedJob API to run or launch a script.
 
@@ -112,6 +108,12 @@ class BaseScriptRunner:
                 Via Relay: peers are both connected to the relay if a relay is used; otherwise via root.
                 Via CP: peers are both connected to the CP
                 If not specified, will be via CP.
+
+            launch_once (bool): Whether the external process will be launched only once at the beginning
+                or on each task. Only used if `launch_external_process` is True. Defaults to True.
+
+            shutdown_timeout (float): If provided, will wait for this number of seconds before shutdown.
+                Only used if `launch_external_process` is True. Defaults to 0.0.
         """
         self._script = script
         self._script_args = script_args
@@ -121,6 +123,8 @@ class BaseScriptRunner:
         self._framework = framework
         self._params_transfer_type = params_transfer_type
         self._pipe_connect_type = pipe_connect_type
+        self._launch_once = launch_once
+        self._shutdown_timeout = shutdown_timeout
 
         self._params_exchange_format = None
 
@@ -210,6 +214,8 @@ class BaseScriptRunner:
                 if self._launcher
                 else SubprocessLauncher(
                     script=self._command + " custom/" + self._script + " " + self._script_args,
+                    launch_once=self._launch_once,
+                    shutdown_timeout=self._shutdown_timeout,
                 )
             )
             launcher_id = job.add_component("launcher", launcher, ctx)
@@ -301,6 +307,8 @@ class ScriptRunner(BaseScriptRunner):
         server_expected_format: ExchangeFormat = ExchangeFormat.NUMPY,
         params_transfer_type: TransferType = TransferType.FULL,
         pipe_connect_type: PipeConnectType = PipeConnectType.VIA_CP,
+        launch_once: bool = True,
+        shutdown_timeout: float = 0.0,
     ):
         """ScriptRunner is used with FedJob API to run or launch a script.
 
@@ -317,6 +325,10 @@ class ScriptRunner(BaseScriptRunner):
             params_transfer_type (str): How to transfer the parameters. FULL means the whole model parameters are sent.
                 DIFF means that only the difference is sent. Defaults to TransferType.FULL.
             pipe_connect_type (str): how pipe peers are to be connected
+            launch_once (bool): Whether the external process will be launched only once at the beginning
+                or on each task. Only used if `launch_external_process` is True. Defaults to True.
+            shutdown_timeout (float): If provided, will wait for this number of seconds before shutdown.
+                Only used if `launch_external_process` is True. Defaults to 0.0.
         """
         super().__init__(
             script=script,
@@ -327,4 +339,6 @@ class ScriptRunner(BaseScriptRunner):
             framework=framework,
             params_transfer_type=params_transfer_type,
             pipe_connect_type=pipe_connect_type,
+            launch_once=launch_once,
+            shutdown_timeout=shutdown_timeout,
         )

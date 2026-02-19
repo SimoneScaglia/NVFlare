@@ -11,3 +11,33 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+from .cyclic import CyclicRecipe
+from .fedavg import FedAvgRecipe
+from .fedeval import FedEvalRecipe
+from .fedopt import FedOptRecipe
+from .scaffold import ScaffoldRecipe
+
+
+# Lazy imports for recipes with optional dependencies or to avoid circular imports
+def __getattr__(name):
+    if name == "FedAvgRecipeWithHE":
+        from .fedavg_he import FedAvgRecipeWithHE
+
+        return FedAvgRecipeWithHE
+    if name == "SimpleSwarmLearningRecipe":
+        from .swarm import SimpleSwarmLearningRecipe
+
+        return SimpleSwarmLearningRecipe
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+__all__ = [
+    "FedAvgRecipe",
+    "CyclicRecipe",
+    "FedOptRecipe",
+    "ScaffoldRecipe",
+    "FedAvgRecipeWithHE",
+    "FedEvalRecipe",
+    "SimpleSwarmLearningRecipe",
+]

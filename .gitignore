@@ -171,3 +171,8 @@ __pycache__
 
 # swarm sample
 examples/advanced/swarm_learning_tf/swarm_env
+docs/apidocs/
+!docs/apidocs/modules.rst
+
+# Claude Code personal config
+CLAUDE.local.md

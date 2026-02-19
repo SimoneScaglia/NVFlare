@@ -21,7 +21,6 @@ from nvflare.app_common.abstract.model_persistor import ModelPersistor
 from nvflare.app_common.widgets.convert_to_fed_event import ConvertToFedEvent
 from nvflare.app_common.widgets.streaming import AnalyticsReceiver
 from nvflare.app_common.widgets.validation_json_generator import ValidationJsonGenerator
-from nvflare.app_opt.tracking.tb.tb_receiver import TBAnalyticsReceiver
 from nvflare.job_config.base_fed_job import BaseFedJob as UnifiedBaseFedJob
 
 
@@ -32,12 +31,15 @@ class BaseFedJob(UnifiedBaseFedJob):
     For new code, consider using nvflare.job_config.base_fed_job.BaseFedJob directly with
     framework=FrameworkType.TENSORFLOW.
 
-    Configures ValidationJsonGenerator, model selector, TBAnalyticsReceiver, ConvertToFedEvent.
+    Configures ValidationJsonGenerator, model selector, AnalyticsReceiver, ConvertToFedEvent.
 
     User must add controllers and executors.
 
     Args:
-        initial_model (tf.keras.Model): initial TensorFlow Model. Defaults to None.
+        initial_model (tf.keras.Model): Initial TensorFlow model. Defaults to None.
+        initial_ckpt: Absolute path to a pre-trained checkpoint file (.h5, .keras, or SavedModel dir).
+            The file may not exist locally as it could be on the server.
+            Note: TensorFlow can load full models from .h5/SavedModel without model.
         name (name, optional): name of the job. Defaults to "fed_job".
         min_clients (int, optional): the minimum number of clients for the job. Defaults to 1.
         mandatory_clients (List[str], optional): mandatory clients to run the job. Default None.
@@ -52,14 +54,16 @@ class BaseFedJob(UnifiedBaseFedJob):
             If not provided, an IntimeModelSelector will be configured based on key_metric.
         convert_to_fed_event: (ConvertToFedEvent, optional): A component to convert certain events to fed events.
             if not provided, a ConvertToFedEvent object will be created.
-        analytics_receiver (AnalyticsReceiver, optional): Receive analytics.
-            If not provided, a TBAnalyticsReceiver will be configured.
+        analytics_receiver (AnalyticsReceiver | None, optional): Component for receiving analytics data.
+            If not provided, no analytics tracking will be enabled. For experiment tracking (e.g., TensorBoard),
+            explicitly pass a TBAnalyticsReceiver instance.
         model_persistor (optional, ModelPersistor): how to persist the model.
     """
 
     def __init__(
         self,
         initial_model: tf.keras.Model = None,
+        initial_ckpt: Optional[str] = None,
         name: str = "fed_job",
         min_clients: int = 1,
         mandatory_clients: Optional[List[str]] = None,
@@ -70,10 +74,6 @@ class BaseFedJob(UnifiedBaseFedJob):
         analytics_receiver: Optional[AnalyticsReceiver] = None,
         model_persistor: Optional[ModelPersistor] = None,
     ):
-        # Add default TBAnalyticsReceiver if not provided (TensorFlow-specific)
-        if analytics_receiver is None:
-            analytics_receiver = TBAnalyticsReceiver()
-
         # Call the unified BaseFedJob
         super().__init__(
             name=name,
@@ -87,16 +87,20 @@ class BaseFedJob(UnifiedBaseFedJob):
         )
 
         # TensorFlow-specific model setup
-        if initial_model is not None:
-            if not isinstance(initial_model, tf.keras.Model):
-                raise TypeError(
-                    f"initial_model must be an instance of tf.keras.Model, but got {type(initial_model).__name__}"
-                )
-            self._setup_tensorflow_model(initial_model, model_persistor)
+        # TFModel wrapper can handle: tf.keras.Model instances, dict configs, or None
+        if initial_model is not None or initial_ckpt is not None:
+            self._setup_tensorflow_model(initial_model, initial_ckpt, model_persistor)
 
-    def _setup_tensorflow_model(self, model: tf.keras.Model, persistor: Optional[ModelPersistor] = None):
+    def _setup_tensorflow_model(
+        self,
+        initial_model: Optional[tf.keras.Model],
+        initial_ckpt: Optional[str],
+        persistor: Optional[ModelPersistor] = None,
+    ):
         """Setup TensorFlow model with persistor."""
         from nvflare.app_opt.tf.job_config.model import TFModel
+        from nvflare.recipe.utils import prepare_initial_ckpt
 
-        tf_model = TFModel(model=model, persistor=persistor)
+        ckpt_path = prepare_initial_ckpt(initial_ckpt, self)
+        tf_model = TFModel(model=initial_model, initial_ckpt=ckpt_path, persistor=persistor)
         self.comp_ids["persistor_id"] = self.to_server(tf_model)

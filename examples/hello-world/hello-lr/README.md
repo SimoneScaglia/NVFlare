@@ -34,11 +34,13 @@ Install the dependency
 ``` bash
 hello-lr
     |
-    |-- client.py         # client local training script
-    |-- job.py            # job recipe that defines client and server configurations
-    |-- download_data.py  # download dataset
-    |-- prepare_data.py   # prepare data to convert to numpy
-    |-- requirements.txt  # dependencies
+    |-- client.py              # client local training script
+    |-- job.py                 # job recipe that defines client and server configurations
+    |-- download_data.py       # download dataset
+    |-- prepare_data.py        # prepare data to convert to numpy
+    |-- train_centralized.py   # centralized training baseline for comparison
+    |-- requirements.txt       # dependencies
+    |-- figs/                  # visualization figures
 ```
 
 
@@ -152,7 +154,8 @@ script.
   model, sent by the server, using `flare.receive()` API. The received
   global model is an instance of `FLModel`.
 - A local validation is first performed, where validation metrics
-  
+  (accuracy and precision) are computed and streamed to the server.
+  The streamed metrics can be loaded and visualized using TensorBoard.
 - Then each client computes it's gradient and Hessian based on local
   training data, using their respective theoretical formula described
   above. This is implemented in the
@@ -173,34 +176,98 @@ We leverage a builtin FLARE logistic regression with Newton Raphson method.
 the server side fedavg class is located at `nvflare.app_common.workflows.lr.fedavg.FedAvgLR`
 
 ## Job
-```
-  recipe = FedAvgLrRecipe(
-  num_rounds=num_rounds,
-  damping_factor=0.8,
-  num_features=13,
-  train_script="client.py",
-  train_args=f"--data_root {data_root}",
-  )
-  env = SimEnv(num_clients=n_clients, num_threads=n_clients)
-  run = recipe.execute(env)
+```python
+recipe = FedAvgLrRecipe(
+    min_clients=n_clients,
+    num_rounds=num_rounds,
+    damping_factor=0.8,
+    num_features=13,  # Model is created internally based on num_features
+    # For pre-trained weights: initial_ckpt="/server/path/to/lr_model.npy",
+    train_script="client.py",
+    train_args=f"--data_root {data_root}",
+)
+env = SimEnv(num_clients=n_clients, num_threads=n_clients)
+run = recipe.execute(env)
   # run.get_result()
 ```
 
 ## Download and prepare data
 
-Execute the following script
-```
+Execute the following scripts:
+```bash
 python download_data.py 
 python prepare_data.py 
 ```
 This will download the heart disease dataset under
 `/tmp/flare/dataset/heart_disease_data/`
 
+## Centralized Logistic Regression (Baseline)
 
-## Running Job 
+Before running federated learning, you can run a centralized baseline for comparison:
+
+```bash
+python train_centralized.py --solver custom
+```
+
+Two implementations of logistic regression are provided in the
+centralized training script, which can be specified by the `--solver`
+argument:
+- `custom`: Manually implemented using the theoretical Newton-Raphson update formulas
+- `sklearn`: Using `sklearn.LogisticRegression` with `newton-cholesky` solver
+
+Both implementations converge in approximately 4 iterations and produce similar results.
+
+Example output:
+```
+using solver: custom
+loading training data.
+training data X loaded. shape: (486, 13)
+training data y loaded. shape: (486, 1)
+
+site - 1
+validation set n_samples:  104
+accuracy: 0.75
+precision: 0.7115384615384616
+
+site - 2
+validation set n_samples:  89
+accuracy: 0.7528089887640449
+precision: 0.6122448979591837
+
+site - 3
+validation set n_samples:  16
+accuracy: 0.75
+precision: 1.0
+
+site - 4
+validation set n_samples:  45
+accuracy: 0.6
+precision: 0.9047619047619048
+```
+
+## Federated Logistic Regression
 
 Execute the following command to launch federated logistic
-regression. This will run in nvflare's simulation mode.
-```
+regression. This will run in NVFlare's simulation mode:
+
+```bash
 python job.py
 ```
+
+You can customize the number of clients and rounds:
+```bash
+python job.py --n_clients 4 --num_rounds 5
+```
+
+### Viewing Results with TensorBoard
+
+Accuracy and precision for each site can be viewed in TensorBoard:
+```bash
+tensorboard --logdir=<workspace_dir>/server/simulate_job/tb_events
+```
+
+As can be seen from the figure below, per-site evaluation metrics in
+federated logistic regression are on-par with the centralized baseline.
+
+<img src="./figs/tb-metrics.png" alt="TensorBoard metrics visualization" width="800"/>
+

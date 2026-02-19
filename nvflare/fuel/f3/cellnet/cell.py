@@ -193,7 +193,7 @@ class Cell(StreamCell):
         future_to_target = {}
 
         # encode the request now so each target thread won't need to do it again.
-        self._encode_message(request, abort_signal)
+        self._encode_message(request, abort_signal, num_receivers=len(targets))
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(targets)) as executor:
             self.logger.debug(f"broadcast to {targets=}")
@@ -297,13 +297,13 @@ class Cell(StreamCell):
         else:
             return True
 
-    def _encode_message(self, msg: Message, abort_signal) -> int:
+    def _encode_message(self, msg: Message, abort_signal, num_receivers=1) -> int:
         try:
-            return encode_payload(
-                msg,
-                StreamHeaderKey.PAYLOAD_ENCODING,
-                fobs_ctx=self.get_fobs_context({FOBSContextKey.ABORT_SIGNAL: abort_signal}),
-            )
+            props = {
+                FOBSContextKey.ABORT_SIGNAL: abort_signal,
+                FOBSContextKey.NUM_RECEIVERS: num_receivers,
+            }
+            return encode_payload(msg, StreamHeaderKey.PAYLOAD_ENCODING, fobs_ctx=self.get_fobs_context(props))
         except BaseException as exc:
             self.logger.error(f"Can't encode {msg=} {exc=}")
             raise exc
@@ -401,7 +401,8 @@ class Cell(StreamCell):
             return self._get_result(req_id)
         except Exception as ex:
             self.logger.error(f"exception sending request: {secure_format_exception(ex)}")
-            return self._get_result(req_id)
+            self.requests_dict.pop(req_id, None)
+            raise ex
 
     def _process_reply(self, future: StreamFuture):
         headers = future.headers

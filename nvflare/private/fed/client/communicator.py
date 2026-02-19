@@ -375,17 +375,23 @@ class Communicator:
         self.logger.debug(f"pulling task from parent FQCN: {parent_fqcn}")
 
         fqcn = FQCN.join([parent_fqcn, job_id])
-        task = self.cell.send_request(
-            target=fqcn,
-            channel=CellChannel.SERVER_COMMAND,
-            topic=ServerCommandNames.GET_TASK,
-            request=task_message,
-            timeout=timeout,
-            optional=True,
-            abort_signal=fl_ctx.get_run_abort_signal(),
-        )
+        task = None
+        try:
+            task = self.cell.send_request(
+                target=fqcn,
+                channel=CellChannel.SERVER_COMMAND,
+                topic=ServerCommandNames.GET_TASK,
+                request=task_message,
+                timeout=timeout,
+                optional=True,
+                abort_signal=fl_ctx.get_run_abort_signal(),
+            )
+            return_code = task.get_header(MessageHeaderKey.RETURN_CODE)
+        except Exception as ex:
+            self.logger.error(f"Error getting task: {ex}")
+            return_code = ReturnCode.INVALID_REQUEST
+
         end_time = time.time()
-        return_code = task.get_header(MessageHeaderKey.RETURN_CODE)
 
         if return_code == ReturnCode.OK:
             size = task.get_header(MessageHeaderKey.PAYLOAD_LEN)
@@ -395,6 +401,20 @@ class Communicator:
 
             task_name = task_data.get_header(ServerCommandKey.TASK_NAME)
             self.logger.debug(f"received task from parent {parent_fqcn}: {task_name=}")
+
+            # Check if server requires a minimum get_task_timeout (e.g., for tensor streaming)
+            min_timeout = task_data.get_header(ServerCommandKey.MIN_GET_TASK_TIMEOUT)
+            if min_timeout is not None:
+                with self._state_lock:
+                    if min_timeout > self.timeout:
+                        old_timeout = self.timeout
+                        self.timeout = min_timeout
+                        # Only log when actually adjusting timeout
+                        self.logger.info(
+                            f"Server requires get_task_timeout >= {min_timeout}s (likely for tensor streaming). "
+                            f"Automatically adjusting from {old_timeout}s to {min_timeout}s."
+                        )
+
             fl_ctx.set_prop(FLContextKey.SSID, ssid, sticky=False)
             if task_name not in [SpecialTaskName.END_RUN, SpecialTaskName.TRY_AGAIN]:
                 self.logger.info(
@@ -405,10 +425,10 @@ class Communicator:
                 self.pending_task = task_data
         elif return_code == ReturnCode.AUTHENTICATION_ERROR:
             self.logger.warning("get_task request authentication failed.")
-            return None
-        else:
             task = None
+        else:
             self.logger.warning(f"Failed to get_task from {parent_fqcn}. Will try it again.")
+            task = None
 
         return task
 
