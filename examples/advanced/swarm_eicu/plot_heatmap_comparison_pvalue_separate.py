@@ -385,17 +385,17 @@ if __name__ == "__main__":
         #     'n_training_samples': 7155,
         #     'n_test_samples': 3066
         # },
-        # {
-        #     'exp': 'A = Swarm 5 nodes (2500 rows/node) vs B = Central (12500 rows) mimic iv fixed 12500',
-        #     'dir1': 'results/mimiciv_fixed_12500_entire_testset',
-        #     'file1': 'swarm_results_entire_testset.csv',
-        #     'node1': 5,
-        #     'dir2': 'results/mimiciv_fixed_12500_entire_testset',
-        #     'file2': 'central_results.csv',
-        #     'node2': 5,
-        #     'n_training_samples': 2500,
-        #     'n_test_samples': 1071
-        # },
+        {
+            'exp': 'A = Swarm 5 nodes (2500 rows/node) vs B = Central (12500 rows) mimic iv fixed 12500',
+            'dir1': 'results/mimiciv_fixed_12500_entire_testset',
+            'file1': 'swarm_results_entire_testset.csv',
+            'node1': 5,
+            'dir2': 'results/mimiciv_fixed_12500_entire_testset',
+            'file2': 'central_results.csv',
+            'node2': 5,
+            'n_training_samples': 2500,
+            'n_test_samples': 1071
+        },
         {
             'exp': 'A = Swarm 5 nodes (2459 rows/node) vs B = Central (12295 rows) mimic iii entire test set',
             'dir1': 'results/mimiciii_total_entire_testset',
