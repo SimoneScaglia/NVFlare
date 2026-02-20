@@ -13,46 +13,42 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Adaptive swarm learning with periodic grid search hyperparameter tuning.
+Adaptive central training with periodic grid search hyperparameter tuning.
 
-New workflow:
+Workflow:
   For each dataset (mimic_iii, mimic_iv):
     For each configuration (5nodes, 10nodes, 20nodes, 40nodes):
       For each group of 5 num_nodes (boundary at 5, 10, 15, ...):
-        1. Grid search: run swarm at the boundary num_nodes
-           with 3 random iterations and all lr/bs combinations
-        2. Pick best (lr, bs) based on average AUC across sites/iterations
-        3. Save grid search results (heatmap-compatible CSV)
-        4. Run swarm for all num_nodes in the group (all 10 iterations)
+        1. Grid search at the boundary num_nodes:
+           merge data from boundary_nodes, train centralized model,
+           evaluate on test with 3 random iterations x all lr/bs combos
+        2. Pick best (lr, bs) based on mean AUC
+        3. Save grid search results to datasets/{dataset}/same_size_results/{config}/
+        4. Run central training for all num_nodes in the group (all 10 iterations)
            using the best hyperparameters
-        5. Save swarm results to results/{dataset}/swarm_results.csv
+        5. Save results to results/{dataset}/central_results.csv
 
     Grid search hyperparameters:
-      batch_sizes = [8, 16, 32, 64, 128, 256, 512]
+      batch_sizes = [16, 32, 64, 128, 256, 512]
       lrs = [0.0001, 0.001, 0.01, 0.1]
 
     Group assignment example (for 20nodes config):
-      Grid search at n=5  -> best params used for num_nodes = 2,3,4,5
-      Grid search at n=10 -> best params used for num_nodes = 6,7,8,9,10
-      Grid search at n=15 -> best params used for num_nodes = 11,12,13,14,15
-      Grid search at n=20 -> best params used for num_nodes = 16,17,18,19,20
+      Grid search at n=5  -> best params for num_nodes = 2,3,4,5
+      Grid search at n=10 -> best params for num_nodes = 6,7,8,9,10
+      Grid search at n=15 -> best params for num_nodes = 11,12,13,14,15
+      Grid search at n=20 -> best params for num_nodes = 16,17,18,19,20
 
 Usage:
-    python run-swarm-adaptive.py                         # both datasets, all configs
-    python run-swarm-adaptive.py --dataset mimic_iii     # single dataset
-    python run-swarm-adaptive.py --dataset mimic_iv --config 10nodes  # single config
+    python run-central-adaptive.py                        # both datasets, all configs
+    python run-central-adaptive.py --dataset mimic_iii    # single dataset
+    python run-central-adaptive.py --config 10nodes       # single config
 """
 
 import argparse
 import gc
 import os
 import random
-import re
-import shutil
-import subprocess
-import sys
 from datetime import datetime
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -79,15 +75,6 @@ DATASETS = ["mimic_iii", "mimic_iv"]
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-SWARM_TF_DIR = os.path.normpath(os.path.join(SCRIPT_DIR, "..", "swarm_learning_tf"))
-CONFIG_FILE = os.path.normpath(os.path.join(
-    SCRIPT_DIR, "..", "..", "..", "job_templates",
-    "swarm_cse_tf_model_learner", "config_fed_client.conf"
-))
-
-# Add mimic networks to path for FCN model
-sys.path.insert(0, os.path.join(SWARM_TF_DIR, "code", "mimic", "networks"))
-from mimic_nets import FCN  # noqa: E402
 
 
 # ── Reproducibility ───────────────────────────────────────────────────────────
@@ -104,73 +91,26 @@ def set_seed(seed=SEED):
 set_seed()
 
 
-# ── Shell command execution ───────────────────────────────────────────────────
-def run_command(command, cwd=None):
-    """Execute a shell command with swarm_env activated."""
-    if cwd is None:
-        cwd = SWARM_TF_DIR
-    activate_env = f"source {SWARM_TF_DIR}/swarm_env/bin/activate && "
-    full_command = activate_env + command
-    result = subprocess.run(
-        full_command, shell=True, capture_output=True, text=True,
-        cwd=cwd, executable='/bin/bash'
-    )
-    if result.returncode != 0:
-        print(f"  [CMD ERROR] {command}")
-        if result.stdout:
-            print(f"  STDOUT (last 500 chars): {result.stdout[-500:]}")
-        if result.stderr:
-            print(f"  STDERR (last 500 chars): {result.stderr[-500:]}")
-    return result
+# ── Model ─────────────────────────────────────────────────────────────────────
+def get_net(input_dim):
+    """Build the FCN model (same architecture as mimic_nets.py)."""
+    kernel_init = tf.keras.initializers.GlorotUniform(seed=SEED)
+    bias_init = tf.keras.initializers.Zeros()
+    model = tf.keras.Sequential([
+        tf.keras.layers.Dense(16, activation="relu", input_shape=(input_dim,),
+                              kernel_initializer=kernel_init, bias_initializer=bias_init),
+        tf.keras.layers.Dense(16, activation="relu",
+                              kernel_initializer=kernel_init, bias_initializer=bias_init),
+        tf.keras.layers.Dense(16, activation="relu",
+                              kernel_initializer=kernel_init, bias_initializer=bias_init),
+        tf.keras.layers.Dense(1, activation="sigmoid",
+                              kernel_initializer=kernel_init, bias_initializer=bias_init),
+    ])
+    return model
 
 
-# ── NVFlare config editing ────────────────────────────────────────────────────
-def edit_config_file(min_responses_required, learning_rate, batch_size):
-    """Edit the NVFlare config_fed_client.conf with given hyperparameters."""
-    with open(CONFIG_FILE, 'r') as f:
-        content = f.read()
-
-    content = re.sub(
-        r'min_responses_required\s*=\s*\d+',
-        f'min_responses_required = {min_responses_required}',
-        content
-    )
-
-    learner_pattern = r'(id = "mimic-learner"[^{]*args \{)([^}]+)(\})'
-
-    def update_learner_args(match):
-        args_section = match.group(2)
-        args_section = re.sub(r'lr\s*=\s*[\d.eE+-]+', f'lr = {learning_rate}', args_section)
-        args_section = re.sub(r'batch_size\s*=\s*\d+', f'batch_size = {batch_size}', args_section)
-        return match.group(1) + args_section + match.group(3)
-
-    content = re.sub(learner_pattern, update_learner_args, content, flags=re.DOTALL)
-
-    with open(CONFIG_FILE, 'w') as f:
-        f.write(content)
-
-
-# ── Data file management ─────────────────────────────────────────────────────
-def copy_data_files(data_dir, num_nodes, iteration):
-    """Copy node CSV files to /tmp/mimic_data/ as site-{i}.csv."""
-    dest = "/tmp/mimic_data"
-    os.makedirs(dest, exist_ok=True)
-
-    # Clean old files
-    for f in os.listdir(dest):
-        os.remove(os.path.join(dest, f))
-
-    for i in range(1, num_nodes + 1):
-        src = os.path.join(data_dir, f"node{i}_{iteration}.csv")
-        dst = os.path.join(dest, f"site-{i}.csv")
-        if os.path.isfile(src):
-            shutil.copy(src, dst)
-        else:
-            print(f"  WARNING: {src} does not exist!")
-
-
-# ── Metrics helpers ───────────────────────────────────────────────────────────
-def get_metrics_fns():
+def get_metrics():
+    """Build fresh metric objects for model compilation."""
     return [
         tf.keras.metrics.AUC(name='auc', curve='ROC', num_thresholds=1000),
         tf.keras.metrics.AUC(name='auprc', curve='PR', num_thresholds=1000),
@@ -180,96 +120,75 @@ def get_metrics_fns():
     ]
 
 
-# ── Core swarm experiment ─────────────────────────────────────────────────────
-def run_swarm_experiment(dataset, configuration, num_nodes, iteration, lr, bs):
+# ── Core central training ────────────────────────────────────────────────────
+def run_central_experiment(dataset, configuration, num_nodes, iteration, lr, bs):
     """
-    Run one swarm learning experiment via NVFlare simulator.
+    Run one central training experiment.
 
-    Returns a list of (site_id, metrics_dict) tuples.
+    Merges data from num_nodes CSVs, trains one model, evaluates on test set.
+    Returns metrics dict or None on failure.
     """
     data_dir = os.path.join(SCRIPT_DIR, "datasets", dataset, "same_size", configuration)
     test_path = os.path.join(SCRIPT_DIR, "datasets", dataset, "test.csv")
 
-    # 1. Copy data files
-    copy_data_files(data_dir, num_nodes, iteration)
-
-    # 2. Edit NVFlare config
-    edit_config_file(num_nodes, lr, bs)
-
-    # 3. Sync code
-    run_command("rsync -av --exclude='dataset' ../mimic ./code/", cwd=SWARM_TF_DIR)
-
-    # 4. Create NVFlare job
-    job_name = f"mimic_swarm_{num_nodes}"
-    run_command(
-        f"nvflare job create -j ./jobs/{job_name} "
-        f"-w swarm_cse_tf_model_learner -sd ./code -force",
-        cwd=SWARM_TF_DIR
-    )
-
-    # 5. Run NVFlare simulator
-    run_command(
-        f"nvflare simulator ./jobs/{job_name} "
-        f"-w /tmp/nvflare/{job_name} -n {num_nodes} -t {num_nodes}",
-        cwd=SWARM_TF_DIR
-    )
-
-    # 6. Evaluate global models
+    # Load test data
     test_df = pd.read_csv(test_path)
     X_test = test_df.iloc[:, :-1].values.astype(np.float32)
     y_test = test_df.iloc[:, -1].values.astype(np.float32)
     input_dim = X_test.shape[1]
 
-    site_results = []
-    models_path = f"/tmp/nvflare/{job_name}"
-
-    for j in range(1, num_nodes + 1):
-        model_path = os.path.join(
-            models_path, f'site-{j}', 'simulate_job',
-            f'app_site-{j}', f'site-{j}.weights.h5'
-        )
-        if not os.path.exists(model_path):
-            print(f"  Model not found: {model_path}")
+    # Merge training data from all nodes
+    all_dfs = []
+    for node_id in range(1, num_nodes + 1):
+        train_file = os.path.join(data_dir, f"node{node_id}_{iteration}.csv")
+        if not os.path.exists(train_file):
+            print(f"  WARNING: {train_file} does not exist, skipping node {node_id}")
             continue
+        all_dfs.append(pd.read_csv(train_file))
 
-        try:
-            tf.keras.backend.clear_session()
-            model = FCN(input_dim=input_dim)
-            model.build((None, input_dim))
-            model.load_weights(model_path)
-            model.compile(
-                optimizer=tf.keras.optimizers.Adam(learning_rate=lr),
-                loss='binary_crossentropy',
-                metrics=get_metrics_fns()
-            )
+    if len(all_dfs) == 0:
+        print(f"  ERROR: No training data found for config={configuration} iter={iteration}")
+        return None
 
-            metrics = model.evaluate(X_test, y_test, verbose=0, return_dict=True)
-            site_results.append((j, metrics))
-        except Exception as e:
-            print(f"  Error evaluating site-{j}: {e}")
-        finally:
-            gc.collect()
+    merged_df = pd.concat(all_dfs, ignore_index=True)
+    X_train = merged_df.iloc[:, :-1].values.astype(np.float32)
+    y_train = merged_df.iloc[:, -1].values.astype(np.float32)
 
-    # 7. Clean up simulator output
-    if os.path.exists(models_path):
-        shutil.rmtree(models_path)
+    try:
+        tf.keras.backend.clear_session()
+        random.seed(SEED)
+        np.random.seed(SEED)
+        tf.random.set_seed(SEED)
 
-    return site_results
+        model = get_net(input_dim)
+        model.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate=lr),
+            loss='binary_crossentropy',
+            metrics=get_metrics()
+        )
+        model.fit(X_train, y_train, epochs=EPOCHS, batch_size=bs, verbose=0)
+        metrics = model.evaluate(X_test, y_test, verbose=0, return_dict=True)
+        return metrics
+    except Exception as e:
+        print(f"  Error in central training: {e}")
+        return None
+    finally:
+        gc.collect()
 
 
 # ── Grid search ───────────────────────────────────────────────────────────────
 def grid_search(dataset, configuration, num_nodes):
     """
-    Run swarm grid search at a boundary num_nodes.
+    Run central grid search at a boundary num_nodes.
 
     Tries all (batch_size, learning_rate) combinations with 3 random iterations.
     Returns (best_lr, best_bs) and saves results CSV for heatmap.
     """
-    # Check if grid search was already completed (resumability)
     gs_dir = os.path.join(SCRIPT_DIR, "datasets", dataset, "same_size_results", configuration)
     os.makedirs(gs_dir, exist_ok=True)
-    gs_file = os.path.join(gs_dir, f"grid_search_n{num_nodes}.csv")
+    gs_file = os.path.join(gs_dir, f"central_grid_search_n{num_nodes}.csv")
 
+    # Check if grid search was already completed (resumability)
     if os.path.exists(gs_file):
         print(f"\n  Grid search already completed: {gs_file}")
         gs_df = pd.read_csv(gs_file)
@@ -277,11 +196,10 @@ def grid_search(dataset, configuration, num_nodes):
             best_lr, best_bs = _find_best_params(gs_df)
             print(f"  Loaded best params: LR={best_lr} BS={best_bs}")
             return best_lr, best_bs
-        # If file exists but empty, redo
         print(f"  File empty, re-running grid search...")
 
     print(f"\n{'='*60}")
-    print(f"GRID SEARCH: dataset={dataset} config={configuration} num_nodes={num_nodes}")
+    print(f"CENTRAL GRID SEARCH: dataset={dataset} config={configuration} num_nodes={num_nodes}")
     print(f"Hyperparameters: BS={BATCH_SIZES} LR={LRS}")
     print(f"{'='*60}")
 
@@ -290,7 +208,6 @@ def grid_search(dataset, configuration, num_nodes):
     iterations = sorted(rng.sample(range(NUM_ITERATIONS), GRID_SEARCH_ITERS))
     print(f"Selected iterations for grid search: {iterations}")
 
-    # Run all combinations
     gs_results = []
     total = len(BATCH_SIZES) * len(LRS) * len(iterations)
     done = 0
@@ -302,25 +219,24 @@ def grid_search(dataset, configuration, num_nodes):
                 done += 1
                 print(f"\n  [{done}/{total}] BS={bs} LR={lr} Iter={iteration} (n={num_nodes})")
 
-                site_results = run_swarm_experiment(
+                metrics = run_central_experiment(
                     dataset, configuration, num_nodes, iteration, lr, bs
                 )
 
-                for site_id, m in site_results:
+                if metrics is not None:
                     gs_results.append({
                         'num_nodes': num_nodes,
                         'iteration': iteration,
-                        'site_id': site_id,
                         'batch_size': bs,
                         'learning_rate': lr,
-                        'loss': m['loss'],
-                        'auc': m['auc'],
-                        'auprc': m['auprc'],
-                        'accuracy': m['accuracy'],
-                        'precision': m['precision'],
-                        'recall': m['recall'],
+                        'loss': metrics['loss'],
+                        'auc': metrics['auc'],
+                        'auprc': metrics['auprc'],
+                        'accuracy': metrics['accuracy'],
+                        'precision': metrics['precision'],
+                        'recall': metrics['recall'],
                     })
-                    combo_aucs.append(m['auc'])
+                    combo_aucs.append(metrics['auc'])
 
             avg_auc = np.mean(combo_aucs) if combo_aucs else 0
             print(f"  -> Avg AUC for BS={bs} LR={lr}: {avg_auc:.4f}")
@@ -347,28 +263,28 @@ def _find_best_params(gs_df):
     return best_lr, int(best_bs)
 
 
-# ── Swarm runs for a group ────────────────────────────────────────────────────
-def run_swarm_group(dataset, configuration, num_nodes_range, lr, bs):
+# ── Central runs for a group ──────────────────────────────────────────────────
+def run_central_group(dataset, configuration, num_nodes_range, lr, bs):
     """
-    Run swarm experiments for a group of num_nodes using given hyperparameters.
-    All 10 iterations are executed. Results are appended to swarm_results.csv.
+    Run central experiments for a group of num_nodes using given hyperparameters.
+    All 10 iterations are executed. Results are appended to central_results.csv.
     """
     print(f"\n{'='*60}")
-    print(f"SWARM RUNS: dataset={dataset} config={configuration} "
+    print(f"CENTRAL RUNS: dataset={dataset} config={configuration} "
           f"nodes={list(num_nodes_range)} LR={lr} BS={bs}")
     print(f"{'='*60}")
 
     results_dir = os.path.join(SCRIPT_DIR, "results", dataset)
     os.makedirs(results_dir, exist_ok=True)
-    results_file = os.path.join(results_dir, "swarm_results.csv")
+    results_file = os.path.join(results_dir, "central_results.csv")
 
     # Load or create results dataframe
     if os.path.exists(results_file):
         results_df = pd.read_csv(results_file)
     else:
         results_df = pd.DataFrame(columns=[
-            'datetime', 'configuration', 'num_nodes', 'site_id',
-            'iteration', 'lr', 'batch_size',
+            'datetime', 'configuration', 'num_nodes',
+            'iteration', 'lr', 'batch_size', 'epochs',
             'loss', 'auc', 'auprc', 'accuracy', 'precision', 'recall'
         ])
 
@@ -388,42 +304,42 @@ def run_swarm_group(dataset, configuration, num_nodes_range, lr, bs):
             print(f"\n--- Config={configuration} Nodes={num_nodes} "
                   f"Iter={iteration} LR={lr} BS={bs} ---")
 
-            site_results = run_swarm_experiment(
+            metrics = run_central_experiment(
                 dataset, configuration, num_nodes, iteration, lr, bs
             )
 
-            for site_id, m in site_results:
+            if metrics is not None:
                 new_row = {
                     'datetime': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                     'configuration': configuration,
                     'num_nodes': num_nodes,
-                    'site_id': site_id,
                     'iteration': iteration,
                     'lr': lr,
                     'batch_size': bs,
-                    'loss': m['loss'],
-                    'auc': m['auc'],
-                    'auprc': m['auprc'],
-                    'accuracy': m['accuracy'],
-                    'precision': m['precision'],
-                    'recall': m['recall'],
+                    'epochs': EPOCHS,
+                    'loss': metrics['loss'],
+                    'auc': metrics['auc'],
+                    'auprc': metrics['auprc'],
+                    'accuracy': metrics['accuracy'],
+                    'precision': metrics['precision'],
+                    'recall': metrics['recall'],
                 }
                 results_df = pd.concat(
                     [results_df, pd.DataFrame([new_row])], ignore_index=True
                 )
-                print(f"  [Site-{site_id}] AUC={m['auc']:.4f} "
-                      f"AUPRC={m['auprc']:.4f}")
+                print(f"  -> AUC={metrics['auc']:.4f} "
+                      f"AUPRC={metrics['auprc']:.4f}")
 
             # Save after each num_nodes/iteration for safety
             results_df.to_csv(results_file, index=False)
 
-    print(f"\nSwarm results saved to {results_file}")
+    print(f"\nCentral results saved to {results_file}")
 
 
 # ── Main orchestrator ─────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(
-        description="Adaptive swarm learning with periodic grid search"
+        description="Adaptive central training with periodic grid search"
     )
     parser.add_argument(
         '--dataset',
@@ -443,7 +359,7 @@ def main():
     configs = CONFIGS if args.config == 'all' else {args.config: CONFIGS[args.config]}
 
     print(f"\n{'#'*60}")
-    print(f"ADAPTIVE SWARM LEARNING - Started {datetime.now()}")
+    print(f"ADAPTIVE CENTRAL TRAINING - Started {datetime.now()}")
     print(f"Datasets: {datasets}")
     print(f"Configurations: {list(configs.keys())}")
     print(f"Grid search: {len(BATCH_SIZES)} batch_sizes x {len(LRS)} lrs "
@@ -481,7 +397,7 @@ def main():
             # Process groups of GROUP_SIZE
             for group_end in range(GROUP_SIZE, max_nodes + 1, GROUP_SIZE):
                 group_start = group_end - GROUP_SIZE + 1
-                # First group starts at 2 (no point running swarm with 1 node)
+                # First group starts at 2 (no point running central with 1 node)
                 if group_start < 2:
                     group_start = 2
 
@@ -490,9 +406,9 @@ def main():
                 # Phase 1: Grid search at boundary
                 best_lr, best_bs = grid_search(dataset, config_name, group_end)
 
-                # Phase 2: Run swarm for all nodes in this group
+                # Phase 2: Run central for all nodes in this group
                 nodes_range = range(group_start, group_end + 1)
-                run_swarm_group(dataset, config_name, nodes_range, best_lr, best_bs)
+                run_central_group(dataset, config_name, nodes_range, best_lr, best_bs)
 
     print(f"\n{'#'*60}")
     print(f"ALL EXPERIMENTS COMPLETED - {datetime.now()}")
