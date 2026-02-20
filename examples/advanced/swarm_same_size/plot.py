@@ -334,5 +334,5 @@ def main(dataset: str):
 
 
 if __name__ == "__main__":
-    #main("mimic_iv")
+    main("mimic_iv")
     main("mimic_iii")
