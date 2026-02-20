@@ -6,7 +6,7 @@ Creates 2 images:
   - plots_results/plot_auc.png   (AUC vs num_nodes)
   - plots_results/plot_loss.png  (Loss vs num_nodes)
 
-Each image contains 4 vertically-stacked subplots (10nodes, 20nodes, 40nodes, 80nodes).
+Each image contains 4 vertically-stacked subplots (5nodes, 10nodes, 20nodes, 40nodes).
 Three lines per subplot: Local (mean across nodes), Central, Swarm (mean across sites).
 Shaded bands show ±1 std.
 """
@@ -20,16 +20,16 @@ from pathlib import Path
 # ── Configuration ──────────────────────────────────────────────────────
 CONFIGS = {
     "mimic_iv": [
+        {"name": "5nodes",  "max_nodes": 5,  "label": "5 nodes - 8000 rows/node"},
         {"name": "10nodes", "max_nodes": 10, "label": "10 nodes - 4000 rows/node"},
         {"name": "20nodes", "max_nodes": 20, "label": "20 nodes - 2000 rows/node"},
         {"name": "40nodes", "max_nodes": 40, "label": "40 nodes - 1000 rows/node"},
-        {"name": "80nodes", "max_nodes": 80, "label": "80 nodes - 500 rows/node"},
     ],
     "mimic_iii": [
+        {"name": "5nodes",  "max_nodes": 5,  "label": "5 nodes - 2500 rows/node"},
         {"name": "10nodes", "max_nodes": 10, "label": "10 nodes - 1250 rows/node"},
         {"name": "20nodes", "max_nodes": 20, "label": "20 nodes - 625 rows/node"},
         {"name": "40nodes", "max_nodes": 40, "label": "40 nodes - 312 rows/node"},
-        {"name": "80nodes", "max_nodes": 80, "label": "80 nodes - 166 rows/node"},
     ],
 }
 
@@ -215,10 +215,10 @@ def plot_time(dataset: str, shared_x: bool = False):
 
 # ── Swarm comparison: all configs on one graph ─────────────────────────
 SWARM_COLORS = {
+    "5nodes":  "#f39c12",
     "10nodes": "#e74c3c",
     "20nodes": "#2ecc71",
     "40nodes": "#3498db",
-    "80nodes": "#9b59b6",
 }
 
 
@@ -320,7 +320,7 @@ def main(dataset: str):
     plot_metric("loss", "Loss (mean)", f"own_x_plot_loss.png", dataset, ylim=(0.15, 0.5))
     plot_time(dataset)
 
-    # Per-config plots (aligned x-range 2..80)
+    # Per-config plots (aligned x-range 2..40)
     plot_metric("auc", "AUC (mean)", f"aligned_x_plot_auc.png", dataset, ylim=(0.7, 0.9), shared_x=True)
     plot_metric("loss", "Loss (mean)", f"aligned_x_plot_loss.png", dataset, ylim=(0.15, 0.5), shared_x=True)
     plot_time(dataset, shared_x=True)
