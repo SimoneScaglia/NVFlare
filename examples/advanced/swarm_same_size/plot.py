@@ -98,10 +98,8 @@ def plot_metric(metric: str, ylabel: str, output_filename: str, dataset: str, yl
 
         # ── Axes formatting ──
         ax.set_xlim(1.5, x_axis_max + 0.5)
-        if shared_x:
-            ax.set_xticks(np.arange(2, global_max + 1, max(1, global_max // 20)))
-        else:
-            ax.set_xticks(x_range)
+        ax.set_xticks(np.arange(2, (global_max if shared_x else max_nodes) + 1))
+        ax.tick_params(axis='x', labelsize=7)
         ax.set_xlabel("Number of nodes", fontsize=12, fontweight="bold")
         ax.set_ylabel(ylabel, fontsize=12, fontweight="bold")
         ax.set_title(cfg["label"], fontsize=13, fontweight="bold", pad=8)
@@ -111,6 +109,8 @@ def plot_metric(metric: str, ylabel: str, output_filename: str, dataset: str, yl
         if handles:
             ax.legend(fontsize=11, loc="best")
         ax.grid(True, alpha=0.3)
+        _annotate_hyperparams(ax, dataset, config_name, max_nodes,
+                              local_df, central_df, swarm_df)
 
     plt.tight_layout()
 
@@ -156,6 +156,91 @@ def _compute_mean_iter_time(df: pd.DataFrame, config_name: str, x_range):
     return pd.DataFrame(records)
 
 
+# ── Hyperparameter extraction from results CSVs ──────────────────────
+GROUP_SIZE = 5
+
+
+def _get_params_from_results(df, config_name, num_nodes):
+    """Extract the (lr, batch_size) used for a given (config, num_nodes) from a results CSV.
+
+    All rows for the same (config, num_nodes) share the same hyperparameters,
+    so we just take the first row.  Returns (lr, bs) or None.
+    """
+    if df.empty or 'lr' not in df.columns or 'batch_size' not in df.columns:
+        return None
+    sub = df[(df['configuration'] == config_name) & (df['num_nodes'] == num_nodes)]
+    if sub.empty:
+        return None
+    row = sub.iloc[0]
+    return row['lr'], int(row['batch_size'])
+
+
+def _annotate_hyperparams(ax, dataset, config_name, max_nodes,
+                          local_df, central_df, swarm_df):
+    """Add hyperparameter annotations and group separators to a subplot.
+
+    Reads lr / batch_size directly from the results DataFrames.
+    - Vertical dashed lines at group boundaries (every GROUP_SIZE nodes)
+    - Per-group annotations for swarm (blue) and central (green) params
+    - Single annotation for local params (red), constant across all nodes
+    """
+    trans = ax.get_xaxis_transform()  # x in data coords, y in axes coords
+
+    # Local params (same for entire configuration – pick from any num_nodes)
+    local_params = None
+    for nn in range(2, max_nodes + 1):
+        local_params = _get_params_from_results(local_df, config_name, nn)
+        if local_params:
+            break
+    if local_params:
+        lr, bs = local_params
+        ax.text(0.02, 0.04, f"Local: lr={lr:g}  bs={bs}",
+                transform=ax.transAxes, fontsize=7, va='bottom', ha='left',
+                color='#e74c3c', fontweight='bold',
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                          edgecolor='#e74c3c', alpha=0.85, linewidth=0.6))
+
+    # Per-group annotations for swarm & central
+    for group_end in range(GROUP_SIZE, max_nodes + 1, GROUP_SIZE):
+        group_start = max(2, group_end - GROUP_SIZE + 1)
+
+        # Alternating background bands
+        if (group_end // GROUP_SIZE) % 2 == 0:
+            ax.axvspan(group_start - 0.5, group_end + 0.5,
+                       alpha=0.04, color='steelblue', zorder=0)
+
+        # Vertical separator at group boundary
+        if group_end < max_nodes:
+            ax.axvline(x=group_end + 0.5, color='gray',
+                       linestyle=':', alpha=0.4, linewidth=0.8)
+
+        # Pick params from any num_nodes in this group (they all share the same)
+        swarm_params = None
+        central_params = None
+        for nn in range(group_start, group_end + 1):
+            if swarm_params is None:
+                swarm_params = _get_params_from_results(swarm_df, config_name, nn)
+            if central_params is None:
+                central_params = _get_params_from_results(central_df, config_name, nn)
+
+        x_center = (group_start + group_end) / 2
+        parts = []
+        if swarm_params:
+            lr, bs = swarm_params
+            parts.append((f"S: lr={lr:g} bs={bs}", '#3498db'))
+        if central_params:
+            lr, bs = central_params
+            parts.append((f"C: lr={lr:g} bs={bs}", '#2ecc71'))
+
+        for i, (text, color) in enumerate(parts):
+            y_pos = 0.96 - i * 0.09
+            ax.text(x_center, y_pos, text, transform=trans,
+                    fontsize=6, ha='center', va='top',
+                    color=color, fontweight='bold',
+                    bbox=dict(boxstyle='round,pad=0.2', facecolor='white',
+                              edgecolor=color, alpha=0.8, linewidth=0.5))
+
+
 def plot_time(dataset: str, shared_x: bool = False):
     """Create a 4-row figure with mean iteration time (minutes) vs num_nodes."""
 
@@ -190,10 +275,8 @@ def plot_time(dataset: str, shared_x: bool = False):
 
         # Axes formatting
         ax.set_xlim(1.5, x_axis_max + 0.5)
-        if shared_x:
-            ax.set_xticks(np.arange(2, global_max + 1, max(1, global_max // 20)))
-        else:
-            ax.set_xticks(x_range)
+        ax.set_xticks(np.arange(2, (global_max if shared_x else max_nodes) + 1))
+        ax.tick_params(axis='x', labelsize=7)
         ax.set_xlabel("Number of nodes", fontsize=12, fontweight="bold")
         ax.set_ylabel("Time per iteration (min)", fontsize=12, fontweight="bold")
         ax.set_title(cfg["label"], fontsize=13, fontweight="bold", pad=8)
@@ -202,6 +285,8 @@ def plot_time(dataset: str, shared_x: bool = False):
         if handles:
             ax.legend(fontsize=11, loc="best")
         ax.grid(True, alpha=0.3)
+        _annotate_hyperparams(ax, dataset, config_name, max_nodes,
+                              local_df, central_df, swarm_df)
 
     plt.tight_layout()
 
@@ -254,7 +339,8 @@ def plot_swarm_comparison(metric: str, ylabel: str, output_filename: str, datase
 
     global_max = max(c["max_nodes"] for c in CONFIGS[dataset])
     ax.set_xlim(1.5, global_max + 0.5)
-    ax.set_xticks(np.arange(2, global_max + 1, max(1, global_max // 20)))
+    ax.set_xticks(np.arange(2, global_max + 1))
+    ax.tick_params(axis='x', labelsize=7)
     ax.set_xlabel("Number of nodes", fontsize=12, fontweight="bold")
     ax.set_ylabel(ylabel, fontsize=12, fontweight="bold")
     ax.set_title(f"Swarm Learning – {ylabel} comparison", fontsize=14, fontweight="bold", pad=10)
@@ -297,7 +383,8 @@ def plot_swarm_time_comparison(dataset: str):
                 color=color, label=cfg["label"], linewidth=2, markersize=4)
 
     ax.set_xlim(1.5, global_max + 0.5)
-    ax.set_xticks(np.arange(2, global_max + 1, max(1, global_max // 20)))
+    ax.set_xticks(np.arange(2, global_max + 1))
+    ax.tick_params(axis='x', labelsize=7)
     ax.set_xlabel("Number of nodes", fontsize=12, fontweight="bold")
     ax.set_ylabel("Time per iteration (min)", fontsize=12, fontweight="bold")
     ax.set_title("Swarm Learning – Time per iteration comparison", fontsize=14, fontweight="bold", pad=10)
@@ -316,17 +403,17 @@ def plot_swarm_time_comparison(dataset: str):
 
 def main(dataset: str):
     # Per-config plots (own x-range)
-    plot_metric("auc", "AUC (mean)", f"own_x_plot_auc.png", dataset, ylim=(0.7, 0.9))
+    plot_metric("auc", "AUC (mean)", f"own_x_plot_auc.png", dataset, ylim=(0.7, 0.95))
     plot_metric("loss", "Loss (mean)", f"own_x_plot_loss.png", dataset, ylim=(0.15, 0.5))
     plot_time(dataset)
 
     # Per-config plots (aligned x-range 2..40)
-    plot_metric("auc", "AUC (mean)", f"aligned_x_plot_auc.png", dataset, ylim=(0.7, 0.9), shared_x=True)
+    plot_metric("auc", "AUC (mean)", f"aligned_x_plot_auc.png", dataset, ylim=(0.7, 0.95), shared_x=True)
     plot_metric("loss", "Loss (mean)", f"aligned_x_plot_loss.png", dataset, ylim=(0.15, 0.5), shared_x=True)
     plot_time(dataset, shared_x=True)
 
     # Swarm comparison (all configs on one graph)
-    plot_swarm_comparison("auc", "AUC (mean)", f"swarm_comparison_plot_auc.png", dataset, ylim=(0.7, 0.9))
+    plot_swarm_comparison("auc", "AUC (mean)", f"swarm_comparison_plot_auc.png", dataset, ylim=(0.7, 0.95))
     plot_swarm_comparison("loss", "Loss (mean)", f"swarm_comparison_plot_loss.png", dataset, ylim=(0.15, 0.5))
     plot_swarm_time_comparison(dataset)
 
