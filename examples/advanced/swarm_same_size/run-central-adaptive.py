@@ -73,6 +73,17 @@ CONFIGS = {
 
 DATASETS = ["mimic_iii", "mimic_iv"]
 
+# ── Restart Point (set to resume after OOM kill) ──────────────────────────────
+# Set RESTART_DATASET to activate restart mode. Everything before this point
+# is skipped. If RESTART_LR and RESTART_BS are both set, grid search is
+# skipped for the restart group (uses these values directly).
+RESTART_DATASET   = None   # e.g., "mimic_iv"
+RESTART_CONFIG    = None   # e.g., "20nodes"
+RESTART_NUM_NODES = None   # e.g., 15
+RESTART_ITERATION = None   # e.g., 3
+RESTART_LR        = None   # e.g., 0.001 (skip grid search if set with RESTART_BS)
+RESTART_BS        = None   # e.g., 64
+
 # ── Paths ──────────────────────────────────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -264,10 +275,12 @@ def _find_best_params(gs_df):
 
 
 # ── Central runs for a group ──────────────────────────────────────────────────
-def run_central_group(dataset, configuration, num_nodes_range, lr, bs):
+def run_central_group(dataset, configuration, num_nodes_range, lr, bs, start_num_nodes=None, start_iteration=None):
     """
     Run central experiments for a group of num_nodes using given hyperparameters.
     All 10 iterations are executed. Results are appended to central_results.csv.
+
+    If start_num_nodes / start_iteration are set, skip entries before that point.
     """
     print(f"\n{'='*60}")
     print(f"CENTRAL RUNS: dataset={dataset} config={configuration} "
@@ -289,7 +302,14 @@ def run_central_group(dataset, configuration, num_nodes_range, lr, bs):
         ])
 
     for num_nodes in num_nodes_range:
+        if start_num_nodes is not None and num_nodes < start_num_nodes:
+            continue
+
         for iteration in range(NUM_ITERATIONS):
+            if (start_num_nodes is not None and num_nodes == start_num_nodes
+                    and start_iteration is not None and iteration < start_iteration):
+                continue
+
             # Check if already computed (resumability)
             existing = results_df[
                 (results_df['configuration'] == configuration) &
@@ -367,7 +387,17 @@ def main():
     print(f"Group size: {GROUP_SIZE} (re-tune every {GROUP_SIZE} nodes)")
     print(f"{'#'*60}")
 
+    restart_active = RESTART_DATASET is not None
+    if restart_active:
+        print(f"\n  [RESTART] Active — jumping to dataset={RESTART_DATASET} "
+              f"config={RESTART_CONFIG} nodes={RESTART_NUM_NODES} "
+              f"iter={RESTART_ITERATION} LR={RESTART_LR} BS={RESTART_BS}")
+
     for dataset in datasets:
+        if restart_active and dataset != RESTART_DATASET:
+            print(f"\n  [RESTART] Skipping dataset {dataset}")
+            continue
+
         print(f"\n{'#'*60}")
         print(f"DATASET: {dataset}")
         print(f"{'#'*60}")
@@ -384,6 +414,10 @@ def main():
             continue
 
         for config_name, max_nodes in configs.items():
+            if restart_active and RESTART_CONFIG is not None and config_name != RESTART_CONFIG:
+                print(f"  [RESTART] Skipping config {config_name}")
+                continue
+
             print(f"\n{'='*60}")
             print(f"CONFIGURATION: {config_name} (max_nodes={max_nodes})")
             print(f"{'='*60}")
@@ -401,14 +435,29 @@ def main():
                 if group_start < 2:
                     group_start = 2
 
+                # Skip entire groups before restart point
+                if restart_active and RESTART_NUM_NODES is not None and RESTART_NUM_NODES > group_end:
+                    print(f"  [RESTART] Skipping group [{group_start}..{group_end}]")
+                    continue
+
                 print(f"\n--- Group: num_nodes = [{group_start}..{group_end}] ---")
 
                 # Phase 1: Grid search at boundary
-                best_lr, best_bs = grid_search(dataset, config_name, group_end)
+                if restart_active and RESTART_LR is not None and RESTART_BS is not None:
+                    best_lr, best_bs = RESTART_LR, RESTART_BS
+                    print(f"  [RESTART] Using provided LR={best_lr} BS={best_bs}, skipping grid search")
+                else:
+                    best_lr, best_bs = grid_search(dataset, config_name, group_end)
 
                 # Phase 2: Run central for all nodes in this group
                 nodes_range = range(group_start, group_end + 1)
-                run_central_group(dataset, config_name, nodes_range, best_lr, best_bs)
+                start_n = RESTART_NUM_NODES if restart_active else None
+                start_i = RESTART_ITERATION if restart_active else None
+                run_central_group(dataset, config_name, nodes_range, best_lr, best_bs, start_n, start_i)
+
+                # Deactivate restart after processing the restart group
+                if restart_active:
+                    restart_active = False
 
     print(f"\n{'#'*60}")
     print(f"ALL EXPERIMENTS COMPLETED - {datetime.now()}")
