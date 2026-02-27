@@ -45,12 +45,18 @@ Usage:
 
 import argparse
 import gc
+import multiprocessing as mp
 import os
 import random
+import warnings
 from datetime import datetime
 
 import numpy as np
 import pandas as pd
+
+# Reduce TensorFlow C++ log noise before importing TF.
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+
 import tensorflow as tf
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -71,6 +77,21 @@ CONFIGS = {
 
 DATASETS = ["mimic_iii", "mimic_iv"]
 
+# Parallelism (set NVFLARE_LOCAL_WORKERS=1 to disable multiprocessing)
+DEFAULT_WORKERS = max(1, min(20, (os.cpu_count() or 1) - 1))
+PARALLEL_WORKERS = int(os.environ.get("NVFLARE_LOCAL_WORKERS", DEFAULT_WORKERS))
+
+# ── Restart Point (set to resume after OOM kill) ──────────────────────────────
+# Set RESTART_DATASET to activate restart mode. Everything before this point
+# is skipped. If RESTART_LR and RESTART_BS are both set, grid search is
+# skipped for the restart config (uses these values directly).
+RESTART_DATASET   = None   # e.g., "mimic_iv"
+RESTART_CONFIG    = None   # e.g., "20nodes"
+RESTART_NUM_NODES = None   # e.g., 15
+RESTART_ITERATION = None   # e.g., 3
+RESTART_LR        = None   # e.g., 0.001 (skip grid search if set with RESTART_BS)
+RESTART_BS        = None   # e.g., 64
+
 # ── Paths ──────────────────────────────────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -87,6 +108,36 @@ def set_seed(seed=SEED):
 
 
 set_seed()
+tf.get_logger().setLevel("ERROR")
+warnings.filterwarnings(
+    "ignore",
+    message=r"Do not pass an `input_shape`/`input_dim` argument to a layer\.",
+    category=UserWarning,
+    module=r"keras\.src\.layers\.core\.dense",
+)
+
+
+def _get_worker_count():
+    if PARALLEL_WORKERS < 1:
+        return 1
+    return PARALLEL_WORKERS
+
+
+def _run_local_single_node_worker(args):
+    dataset, configuration, node_id, iteration, lr, bs = args
+    return run_local_single_node(dataset, configuration, node_id, iteration, lr, bs)
+
+
+def _parallel_map(tasks):
+    workers = _get_worker_count()
+    if workers == 1:
+        return [
+            _run_local_single_node_worker(task)
+            for task in tasks
+        ]
+    ctx = mp.get_context("spawn")
+    with ctx.Pool(processes=workers) as pool:
+        return pool.map(_run_local_single_node_worker, tasks, chunksize=1)
 
 
 # ── Model ─────────────────────────────────────────────────────────────────────
@@ -95,7 +146,8 @@ def get_net(input_dim):
     kernel_init = tf.keras.initializers.GlorotUniform(seed=SEED)
     bias_init = tf.keras.initializers.Zeros()
     model = tf.keras.Sequential([
-        tf.keras.layers.Dense(16, activation="relu", input_shape=(input_dim,),
+        tf.keras.Input(shape=(input_dim,)),
+        tf.keras.layers.Dense(16, activation="relu",
                               kernel_initializer=kernel_init, bias_initializer=bias_init),
         tf.keras.layers.Dense(16, activation="relu",
                               kernel_initializer=kernel_init, bias_initializer=bias_init),
@@ -133,17 +185,17 @@ def run_local_single_node(dataset, configuration, node_id, iteration, lr, bs):
         print(f"  WARNING: {train_file} does not exist")
         return None
 
-    # Load data
-    test_df = pd.read_csv(test_path)
-    X_test = test_df.iloc[:, :-1].values.astype(np.float32)
-    y_test = test_df.iloc[:, -1].values.astype(np.float32)
-    input_dim = X_test.shape[1]
-
-    train_df = pd.read_csv(train_file)
-    X_train = train_df.iloc[:, :-1].values.astype(np.float32)
-    y_train = train_df.iloc[:, -1].values.astype(np.float32)
-
     try:
+        # Load data
+        test_df = pd.read_csv(test_path)
+        X_test = test_df.iloc[:, :-1].values.astype(np.float32)
+        y_test = test_df.iloc[:, -1].values.astype(np.float32)
+        input_dim = X_test.shape[1]
+
+        train_df = pd.read_csv(train_file)
+        X_train = train_df.iloc[:, :-1].values.astype(np.float32)
+        y_train = train_df.iloc[:, -1].values.astype(np.float32)
+
         tf.keras.backend.clear_session()
         random.seed(SEED)
         np.random.seed(SEED)
@@ -162,6 +214,20 @@ def run_local_single_node(dataset, configuration, node_id, iteration, lr, bs):
         print(f"  Error in local training: {e}")
         return None
     finally:
+        # Explicitly release large arrays/dataframes to reduce RAM pressure.
+        for var_name in (
+            "train_df",
+            "test_df",
+            "X_train",
+            "y_train",
+            "X_test",
+            "y_test",
+            "model",
+            "metrics",
+        ):
+            if var_name in locals():
+                del locals()[var_name]
+        tf.keras.backend.clear_session()
         gc.collect()
 
 
@@ -205,15 +271,14 @@ def grid_search(dataset, configuration):
     for bs in BATCH_SIZES:
         for lr in LRS:
             combo_aucs = []
+            tasks = []
             for iteration in iterations:
                 done += 1
                 print(f"\n  [{done}/{total}] BS={bs} LR={lr} Iter={iteration}")
+                tasks.append((dataset, configuration, 1, iteration, lr, bs))
 
-                metrics = run_local_single_node(
-                    dataset, configuration, node_id=1,
-                    iteration=iteration, lr=lr, bs=bs
-                )
-
+            metrics_list = _parallel_map(tasks)
+            for iteration, metrics in zip(iterations, metrics_list):
                 if metrics is not None:
                     gs_results.append({
                         'iteration': iteration,
@@ -234,6 +299,8 @@ def grid_search(dataset, configuration):
 
     # Save grid search results
     gs_df = pd.DataFrame(gs_results)
+    if len(gs_df) > 0:
+        gs_df = gs_df.sort_values(by=['batch_size', 'learning_rate', 'iteration', 'node_id'])
     gs_df.to_csv(gs_file, index=False)
     print(f"\nGrid search results saved to {gs_file}")
 
@@ -255,11 +322,13 @@ def _find_best_params(gs_df):
 
 
 # ── Local runs for all num_nodes ──────────────────────────────────────────────
-def run_local_all(dataset, configuration, max_nodes, lr, bs):
+def run_local_all(dataset, configuration, max_nodes, lr, bs, start_num_nodes=None, start_iteration=None):
     """
     Run local experiments for all num_nodes (2..max) using given hyperparameters.
     Each node trains independently. All 10 iterations are executed.
     Results are appended to local_results.csv.
+
+    If start_num_nodes / start_iteration are set, skip entries before that point.
     """
     print(f"\n{'='*60}")
     print(f"LOCAL RUNS: dataset={dataset} config={configuration} "
@@ -281,7 +350,14 @@ def run_local_all(dataset, configuration, max_nodes, lr, bs):
         ])
 
     for num_nodes in range(2, max_nodes + 1):
+        if start_num_nodes is not None and num_nodes < start_num_nodes:
+            continue
+
         for iteration in range(NUM_ITERATIONS):
+            if (start_num_nodes is not None and num_nodes == start_num_nodes
+                    and start_iteration is not None and iteration < start_iteration):
+                continue
+
             # Check if already computed (resumability)
             existing = results_df[
                 (results_df['configuration'] == configuration) &
@@ -296,11 +372,13 @@ def run_local_all(dataset, configuration, max_nodes, lr, bs):
             print(f"\n--- Config={configuration} Nodes={num_nodes} "
                   f"Iter={iteration} LR={lr} BS={bs} ---")
 
-            for node_id in range(1, num_nodes + 1):
-                metrics = run_local_single_node(
-                    dataset, configuration, node_id, iteration, lr, bs
-                )
+            tasks = [
+                (dataset, configuration, node_id, iteration, lr, bs)
+                for node_id in range(1, num_nodes + 1)
+            ]
+            metrics_list = _parallel_map(tasks)
 
+            for node_id, metrics in zip(range(1, num_nodes + 1), metrics_list):
                 if metrics is not None:
                     new_row = {
                         'datetime': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -360,7 +438,17 @@ def main():
           f"x {GRID_SEARCH_ITERS} iterations (ONE per configuration)")
     print(f"{'#'*60}")
 
+    restart_active = RESTART_DATASET is not None
+    if restart_active:
+        print(f"\n  [RESTART] Active — jumping to dataset={RESTART_DATASET} "
+              f"config={RESTART_CONFIG} nodes={RESTART_NUM_NODES} "
+              f"iter={RESTART_ITERATION} LR={RESTART_LR} BS={RESTART_BS}")
+
     for dataset in datasets:
+        if restart_active and dataset != RESTART_DATASET:
+            print(f"\n  [RESTART] Skipping dataset {dataset}")
+            continue
+
         print(f"\n{'#'*60}")
         print(f"DATASET: {dataset}")
         print(f"{'#'*60}")
@@ -377,6 +465,10 @@ def main():
             continue
 
         for config_name, max_nodes in configs.items():
+            if restart_active and RESTART_CONFIG is not None and config_name != RESTART_CONFIG:
+                print(f"  [RESTART] Skipping config {config_name}")
+                continue
+
             print(f"\n{'='*60}")
             print(f"CONFIGURATION: {config_name} (max_nodes={max_nodes})")
             print(f"{'='*60}")
@@ -388,10 +480,19 @@ def main():
                 continue
 
             # Phase 1: Grid search (ONE per configuration)
-            best_lr, best_bs = grid_search(dataset, config_name)
+            if restart_active and RESTART_LR is not None and RESTART_BS is not None:
+                best_lr, best_bs = RESTART_LR, RESTART_BS
+                print(f"  [RESTART] Using provided LR={best_lr} BS={best_bs}, skipping grid search")
+            else:
+                best_lr, best_bs = grid_search(dataset, config_name)
 
             # Phase 2: Run local for all num_nodes
-            run_local_all(dataset, config_name, max_nodes, best_lr, best_bs)
+            start_n = RESTART_NUM_NODES if restart_active else None
+            start_i = RESTART_ITERATION if restart_active else None
+            run_local_all(dataset, config_name, max_nodes, best_lr, best_bs, start_n, start_i)
+
+            # Deactivate restart after processing the restart config
+            restart_active = False
 
     print(f"\n{'#'*60}")
     print(f"ALL EXPERIMENTS COMPLETED - {datetime.now()}")
