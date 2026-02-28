@@ -13,4 +13,5 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+source "$SCRIPT_DIR/../swarm_learning_tf/swarm_env/bin/activate"
 python3 -u "$SCRIPT_DIR/eicu_run-central-adaptive.py" "$@"
