@@ -75,7 +75,7 @@ CONFIGS = {
     "40nodes": 40,
 }
 
-DATASETS = ["mimic_iii", "mimic_iv"]
+DATASETS = ["mimic_iv_fixed"]
 
 # Parallelism (set NVFLARE_LOCAL_WORKERS=1 to disable multiprocessing)
 DEFAULT_WORKERS = max(1, min(20, (os.cpu_count() or 1) - 1))

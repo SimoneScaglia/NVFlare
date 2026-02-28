@@ -75,7 +75,7 @@ CONFIGS = {
     "40nodes": 40,
 }
 
-DATASETS = ["mimic_iii", "mimic_iv"]
+DATASETS = ["mimic_iv_fixed"]
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -86,7 +86,7 @@ CONFIG_FILE = os.path.normpath(os.path.join(
 ))
 
 # Add mimic networks to path for FCN model
-sys.path.insert(0, os.path.join(SWARM_TF_DIR, "code", "mimic", "networks"))
+sys.path.insert(0, os.path.join(SWARM_TF_DIR, "..", "mimic", "networks"))
 from mimic_nets import FCN  # noqa: E402
 
 

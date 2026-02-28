@@ -71,7 +71,7 @@ CONFIGS = {
     "40nodes": 40,
 }
 
-DATASETS = ["mimic_iii", "mimic_iv"]
+DATASETS = ["mimic_iv_fixed"]
 
 # ── Restart Point (set to resume after OOM kill) ──────────────────────────────
 # Set RESTART_DATASET to activate restart mode. Everything before this point
