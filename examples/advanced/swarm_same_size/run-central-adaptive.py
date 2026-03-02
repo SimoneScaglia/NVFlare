@@ -13,45 +13,37 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Adaptive central training with periodic grid search hyperparameter tuning.
+Fully parallel adaptive central training with periodic grid search.
 
-Workflow:
-  For each dataset (mimic_iii, mimic_iv):
-    For each configuration (5nodes, 10nodes, 20nodes, 40nodes):
-      For each group of 5 num_nodes (boundary at 5, 10, 15, ...):
-        1. Grid search at the boundary num_nodes:
-           merge data from boundary_nodes, train centralized model,
-           evaluate on test with 3 random iterations x all lr/bs combos
-        2. Pick best (lr, bs) based on mean AUC
-        3. Save grid search results to datasets/{dataset}/same_size_results/{config}/
-        4. Run central training for all num_nodes in the group (all 10 iterations)
-           using the best hyperparameters
-        5. Save results to results/{dataset}/central_results.csv
+Parallelization strategy (two-phase):
+  Phase 1: ALL grid searches across all configs/groups run in parallel
+           (each individual experiment is a separate worker task)
+  Phase 2: ALL group runs across all configs/groups/nodes/iterations
+           run in parallel
 
-    Grid search hyperparameters:
-      batch_sizes = [16, 32, 64, 128, 256, 512]
-      lrs = [0.0001, 0.001, 0.01, 0.1]
-
-    Group assignment example (for 20nodes config):
-      Grid search at n=5  -> best params for num_nodes = 2,3,4,5
-      Grid search at n=10 -> best params for num_nodes = 6,7,8,9,10
-      Grid search at n=15 -> best params for num_nodes = 11,12,13,14,15
-      Grid search at n=20 -> best params for num_nodes = 16,17,18,19,20
+Results are collected in the main process and saved sorted by
+(configuration, num_nodes, iteration) — identical to sequential output.
 
 Usage:
     python run-central-adaptive.py                        # both datasets, all configs
     python run-central-adaptive.py --dataset mimic_iii    # single dataset
     python run-central-adaptive.py --config 10nodes       # single config
+    python run-central-adaptive.py --workers 32           # set parallelism
 """
 
 import argparse
 import gc
+import multiprocessing as mp
 import os
 import random
+import warnings
 from datetime import datetime
 
 import numpy as np
 import pandas as pd
+
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+
 import tensorflow as tf
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -69,22 +61,14 @@ CONFIGS = {
     "10nodes": 10,
     "20nodes": 20,
     "40nodes": 40,
+    "80nodes": 80,
 }
 
-DATASETS = ["mimic_iv_fixed"]
+DATASETS = ["mimic_iii", "mimic_iv", "mimic_iv_fixed"]
 
-# ── Restart Point (set to resume after OOM kill) ──────────────────────────────
-# Set RESTART_DATASET to activate restart mode. Everything before this point
-# is skipped. If RESTART_LR and RESTART_BS are both set, grid search is
-# skipped for the restart group (uses these values directly).
-RESTART_DATASET   = None   # e.g., "mimic_iv"
-RESTART_CONFIG    = None   # e.g., "20nodes"
-RESTART_NUM_NODES = None   # e.g., 15
-RESTART_ITERATION = None   # e.g., 3
-RESTART_LR        = None   # e.g., 0.001 (skip grid search if set with RESTART_BS)
-RESTART_BS        = None   # e.g., 64
+DEFAULT_WORKERS = max(1, min(32, (os.cpu_count() or 1) - 1))
+PARALLEL_WORKERS = int(os.environ.get("NVFLARE_CENTRAL_WORKERS", DEFAULT_WORKERS))
 
-# ── Paths ──────────────────────────────────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -100,6 +84,15 @@ def set_seed(seed=SEED):
 
 
 set_seed()
+tf.get_logger().setLevel("ERROR")
+warnings.filterwarnings("ignore")
+
+
+def _init_worker():
+    """Initialize each spawned worker process."""
+    set_seed()
+    tf.get_logger().setLevel("ERROR")
+    warnings.filterwarnings("ignore")
 
 
 # ── Model ─────────────────────────────────────────────────────────────────────
@@ -131,11 +124,18 @@ def get_metrics():
     ]
 
 
+# ── Worker function ───────────────────────────────────────────────────────────
+def _central_experiment_worker(args):
+    """Pool worker: runs one central training experiment."""
+    dataset, configuration, num_nodes, iteration, lr, bs = args
+    set_seed()
+    return run_central_experiment(dataset, configuration, num_nodes, iteration, lr, bs)
+
+
 # ── Core central training ────────────────────────────────────────────────────
 def run_central_experiment(dataset, configuration, num_nodes, iteration, lr, bs):
     """
     Run one central training experiment.
-
     Merges data from num_nodes CSVs, trains one model, evaluates on test set.
     Returns metrics dict or None on failure.
     """
@@ -153,12 +153,10 @@ def run_central_experiment(dataset, configuration, num_nodes, iteration, lr, bs)
     for node_id in range(1, num_nodes + 1):
         train_file = os.path.join(data_dir, f"node{node_id}_{iteration}.csv")
         if not os.path.exists(train_file):
-            print(f"  WARNING: {train_file} does not exist, skipping node {node_id}")
             continue
         all_dfs.append(pd.read_csv(train_file))
 
     if len(all_dfs) == 0:
-        print(f"  ERROR: No training data found for config={configuration} iter={iteration}")
         return None
 
     merged_df = pd.concat(all_dfs, ignore_index=True)
@@ -181,89 +179,13 @@ def run_central_experiment(dataset, configuration, num_nodes, iteration, lr, bs)
         metrics = model.evaluate(X_test, y_test, verbose=0, return_dict=True)
         return metrics
     except Exception as e:
-        print(f"  Error in central training: {e}")
+        print(f"  Error in central training (n={num_nodes} iter={iteration} lr={lr} bs={bs}): {e}")
         return None
     finally:
         gc.collect()
 
 
-# ── Grid search ───────────────────────────────────────────────────────────────
-def grid_search(dataset, configuration, num_nodes):
-    """
-    Run central grid search at a boundary num_nodes.
-
-    Tries all (batch_size, learning_rate) combinations with 3 random iterations.
-    Returns (best_lr, best_bs) and saves results CSV for heatmap.
-    """
-    gs_dir = os.path.join(SCRIPT_DIR, "datasets", dataset, "same_size_results", configuration)
-    os.makedirs(gs_dir, exist_ok=True)
-    gs_file = os.path.join(gs_dir, f"central_grid_search_n{num_nodes}.csv")
-
-    # Check if grid search was already completed (resumability)
-    if os.path.exists(gs_file):
-        print(f"\n  Grid search already completed: {gs_file}")
-        gs_df = pd.read_csv(gs_file)
-        if len(gs_df) > 0:
-            best_lr, best_bs = _find_best_params(gs_df)
-            print(f"  Loaded best params: LR={best_lr} BS={best_bs}")
-            return best_lr, best_bs
-        print(f"  File empty, re-running grid search...")
-
-    print(f"\n{'='*60}")
-    print(f"CENTRAL GRID SEARCH: dataset={dataset} config={configuration} num_nodes={num_nodes}")
-    print(f"Hyperparameters: BS={BATCH_SIZES} LR={LRS}")
-    print(f"{'='*60}")
-
-    # Pick 3 random iterations (deterministic per boundary for reproducibility)
-    rng = random.Random(SEED + num_nodes + hash(configuration) + hash(dataset))
-    iterations = sorted(rng.sample(range(NUM_ITERATIONS), GRID_SEARCH_ITERS))
-    print(f"Selected iterations for grid search: {iterations}")
-
-    gs_results = []
-    total = len(BATCH_SIZES) * len(LRS) * len(iterations)
-    done = 0
-
-    for bs in BATCH_SIZES:
-        for lr in LRS:
-            combo_aucs = []
-            for iteration in iterations:
-                done += 1
-                print(f"\n  [{done}/{total}] BS={bs} LR={lr} Iter={iteration} (n={num_nodes})")
-
-                metrics = run_central_experiment(
-                    dataset, configuration, num_nodes, iteration, lr, bs
-                )
-
-                if metrics is not None:
-                    gs_results.append({
-                        'num_nodes': num_nodes,
-                        'iteration': iteration,
-                        'batch_size': bs,
-                        'learning_rate': lr,
-                        'loss': metrics['loss'],
-                        'auc': metrics['auc'],
-                        'auprc': metrics['auprc'],
-                        'accuracy': metrics['accuracy'],
-                        'precision': metrics['precision'],
-                        'recall': metrics['recall'],
-                    })
-                    combo_aucs.append(metrics['auc'])
-
-            avg_auc = np.mean(combo_aucs) if combo_aucs else 0
-            print(f"  -> Avg AUC for BS={bs} LR={lr}: {avg_auc:.4f}")
-
-    # Save grid search results
-    gs_df = pd.DataFrame(gs_results)
-    gs_df.to_csv(gs_file, index=False)
-    print(f"\nGrid search results saved to {gs_file}")
-
-    # Find best hyperparameters
-    best_lr, best_bs = _find_best_params(gs_df)
-    print(f"\n*** BEST HYPERPARAMETERS: LR={best_lr} BS={best_bs} ***")
-
-    return best_lr, best_bs
-
-
+# ── Helpers ───────────────────────────────────────────────────────────────────
 def _find_best_params(gs_df):
     """Find best (lr, bs) from grid search results based on mean AUC."""
     grouped = gs_df.groupby(['batch_size', 'learning_rate'])['auc'].mean()
@@ -274,92 +196,16 @@ def _find_best_params(gs_df):
     return best_lr, int(best_bs)
 
 
-# ── Central runs for a group ──────────────────────────────────────────────────
-def run_central_group(dataset, configuration, num_nodes_range, lr, bs, start_num_nodes=None, start_iteration=None):
-    """
-    Run central experiments for a group of num_nodes using given hyperparameters.
-    All 10 iterations are executed. Results are appended to central_results.csv.
-
-    If start_num_nodes / start_iteration are set, skip entries before that point.
-    """
-    print(f"\n{'='*60}")
-    print(f"CENTRAL RUNS: dataset={dataset} config={configuration} "
-          f"nodes={list(num_nodes_range)} LR={lr} BS={bs}")
-    print(f"{'='*60}")
-
-    results_dir = os.path.join(SCRIPT_DIR, "results", dataset)
-    os.makedirs(results_dir, exist_ok=True)
-    results_file = os.path.join(results_dir, "central_results.csv")
-
-    # Load or create results dataframe
-    if os.path.exists(results_file):
-        results_df = pd.read_csv(results_file)
-    else:
-        results_df = pd.DataFrame(columns=[
-            'datetime', 'configuration', 'num_nodes',
-            'iteration', 'lr', 'batch_size', 'epochs',
-            'loss', 'auc', 'auprc', 'accuracy', 'precision', 'recall'
-        ])
-
-    for num_nodes in num_nodes_range:
-        if start_num_nodes is not None and num_nodes < start_num_nodes:
-            continue
-
-        for iteration in range(NUM_ITERATIONS):
-            if (start_num_nodes is not None and num_nodes == start_num_nodes
-                    and start_iteration is not None and iteration < start_iteration):
-                continue
-
-            # Check if already computed (resumability)
-            existing = results_df[
-                (results_df['configuration'] == configuration) &
-                (results_df['num_nodes'] == num_nodes) &
-                (results_df['iteration'] == iteration)
-            ]
-            if len(existing) > 0:
-                print(f"  [SKIP] Config={configuration} Nodes={num_nodes} "
-                      f"Iter={iteration} (already in results)")
-                continue
-
-            print(f"\n--- Config={configuration} Nodes={num_nodes} "
-                  f"Iter={iteration} LR={lr} BS={bs} ---")
-
-            metrics = run_central_experiment(
-                dataset, configuration, num_nodes, iteration, lr, bs
-            )
-
-            if metrics is not None:
-                new_row = {
-                    'datetime': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    'configuration': configuration,
-                    'num_nodes': num_nodes,
-                    'iteration': iteration,
-                    'lr': lr,
-                    'batch_size': bs,
-                    'epochs': EPOCHS,
-                    'loss': metrics['loss'],
-                    'auc': metrics['auc'],
-                    'auprc': metrics['auprc'],
-                    'accuracy': metrics['accuracy'],
-                    'precision': metrics['precision'],
-                    'recall': metrics['recall'],
-                }
-                results_df = pd.concat(
-                    [results_df, pd.DataFrame([new_row])], ignore_index=True
-                )
-                print(f"  -> AUC={metrics['auc']:.4f} "
-                      f"AUPRC={metrics['auprc']:.4f}")
-
-            # Save after each num_nodes/iteration for safety
-            results_df.to_csv(results_file, index=False)
-
-    print(f"\nCentral results saved to {results_file}")
+def _get_gs_iterations(dataset, config_name, boundary):
+    """Get deterministic grid search iterations for a boundary."""
+    rng = random.Random(SEED + boundary + hash(config_name) + hash(dataset))
+    return sorted(rng.sample(range(NUM_ITERATIONS), GRID_SEARCH_ITERS))
 
 
 # ── Main orchestrator ─────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(
-        description="Adaptive central training with periodic grid search"
+        description="Fully parallel adaptive central training"
     )
     parser.add_argument(
         '--dataset',
@@ -373,31 +219,28 @@ def main():
         default='all',
         help="Configuration to process (default: all)"
     )
+    parser.add_argument(
+        '--workers', type=int, default=PARALLEL_WORKERS,
+        help=f"Number of parallel workers (default: {PARALLEL_WORKERS}, "
+             f"env: NVFLARE_CENTRAL_WORKERS)"
+    )
     args = parser.parse_args()
 
     datasets = DATASETS if args.dataset == 'both' else [args.dataset]
     configs = CONFIGS if args.config == 'all' else {args.config: CONFIGS[args.config]}
+    workers = args.workers
 
     print(f"\n{'#'*60}")
-    print(f"ADAPTIVE CENTRAL TRAINING - Started {datetime.now()}")
+    print(f"PARALLEL ADAPTIVE CENTRAL TRAINING - Started {datetime.now()}")
     print(f"Datasets: {datasets}")
     print(f"Configurations: {list(configs.keys())}")
-    print(f"Grid search: {len(BATCH_SIZES)} batch_sizes x {len(LRS)} lrs "
-          f"x {GRID_SEARCH_ITERS} iterations")
-    print(f"Group size: {GROUP_SIZE} (re-tune every {GROUP_SIZE} nodes)")
+    print(f"Workers: {workers}")
+    print(f"Grid search: {len(BATCH_SIZES)} BS x {len(LRS)} LR "
+          f"x {GRID_SEARCH_ITERS} iters")
+    print(f"Group size: {GROUP_SIZE}")
     print(f"{'#'*60}")
 
-    restart_active = RESTART_DATASET is not None
-    if restart_active:
-        print(f"\n  [RESTART] Active — jumping to dataset={RESTART_DATASET} "
-              f"config={RESTART_CONFIG} nodes={RESTART_NUM_NODES} "
-              f"iter={RESTART_ITERATION} LR={RESTART_LR} BS={RESTART_BS}")
-
     for dataset in datasets:
-        if restart_active and dataset != RESTART_DATASET:
-            print(f"\n  [RESTART] Skipping dataset {dataset}")
-            continue
-
         print(f"\n{'#'*60}")
         print(f"DATASET: {dataset}")
         print(f"{'#'*60}")
@@ -407,57 +250,229 @@ def main():
         if not os.path.isdir(dataset_dir):
             print(f"ERROR: Dataset directory not found: {dataset_dir}")
             continue
-
         test_path = os.path.join(dataset_dir, "test.csv")
         if not os.path.isfile(test_path):
             print(f"ERROR: Test file not found: {test_path}")
             continue
 
+        # ── PHASE 1: All Grid Searches in Parallel ────────────────────────
+        print(f"\n{'='*60}")
+        print(f"PHASE 1: Grid Searches (all configs/groups in parallel)")
+        print(f"{'='*60}")
+
+        gs_tasks = []    # (dataset, config, boundary, iteration, lr, bs)
+        gs_meta = []     # (config, boundary, iteration, bs, lr)
+        gs_loaded = {}   # (config, boundary) -> already-done DataFrame
+
         for config_name, max_nodes in configs.items():
-            if restart_active and RESTART_CONFIG is not None and config_name != RESTART_CONFIG:
-                print(f"  [RESTART] Skipping config {config_name}")
-                continue
-
-            print(f"\n{'='*60}")
-            print(f"CONFIGURATION: {config_name} (max_nodes={max_nodes})")
-            print(f"{'='*60}")
-
-            # Verify config directory exists
             config_dir = os.path.join(dataset_dir, "same_size", config_name)
             if not os.path.isdir(config_dir):
-                print(f"ERROR: Config directory not found: {config_dir}")
+                print(f"  WARNING: Config dir not found: {config_dir}")
                 continue
 
-            # Process groups of GROUP_SIZE
             for group_end in range(GROUP_SIZE, max_nodes + 1, GROUP_SIZE):
-                group_start = group_end - GROUP_SIZE + 1
-                # First group starts at 2 (no point running central with 1 node)
-                if group_start < 2:
-                    group_start = 2
+                gs_dir = os.path.join(
+                    SCRIPT_DIR, "datasets", dataset,
+                    "same_size_results", config_name
+                )
+                os.makedirs(gs_dir, exist_ok=True)
+                gs_file = os.path.join(
+                    gs_dir, f"central_grid_search_n{group_end}.csv"
+                )
 
-                # Skip entire groups before restart point
-                if restart_active and RESTART_NUM_NODES is not None and RESTART_NUM_NODES > group_end:
-                    print(f"  [RESTART] Skipping group [{group_start}..{group_end}]")
+                # Check if already completed (resumability)
+                if os.path.exists(gs_file):
+                    gs_df = pd.read_csv(gs_file)
+                    if len(gs_df) > 0:
+                        gs_loaded[(config_name, group_end)] = gs_df
+                        print(f"  [LOADED] Grid search: {config_name} "
+                              f"n={group_end}")
+                        continue
+
+                # Need to compute — add individual experiment tasks
+                iterations = _get_gs_iterations(
+                    dataset, config_name, group_end
+                )
+                for bs in BATCH_SIZES:
+                    for lr in LRS:
+                        for iteration in iterations:
+                            gs_tasks.append((
+                                dataset, config_name, group_end,
+                                iteration, lr, bs
+                            ))
+                            gs_meta.append((
+                                config_name, group_end,
+                                iteration, bs, lr
+                            ))
+
+        # Execute all grid search tasks in parallel
+        if gs_tasks:
+            print(f"\n  Submitting {len(gs_tasks)} grid search experiments "
+                  f"to {workers} workers...")
+            ctx = mp.get_context("spawn")
+            with ctx.Pool(
+                processes=workers, initializer=_init_worker
+            ) as pool:
+                gs_results = pool.map(
+                    _central_experiment_worker, gs_tasks, chunksize=1
+                )
+
+            # Organize results by (config, boundary)
+            gs_data = {}
+            for meta, metrics in zip(gs_meta, gs_results):
+                config_name, boundary, iteration, bs, lr = meta
+                key = (config_name, boundary)
+                if key not in gs_data:
+                    gs_data[key] = []
+                if metrics is not None:
+                    gs_data[key].append({
+                        'num_nodes': boundary,
+                        'iteration': iteration,
+                        'batch_size': bs,
+                        'learning_rate': lr,
+                        'loss': metrics['loss'],
+                        'auc': metrics['auc'],
+                        'auprc': metrics['auprc'],
+                        'accuracy': metrics['accuracy'],
+                        'precision': metrics['precision'],
+                        'recall': metrics['recall'],
+                    })
+
+            # Save grid search CSVs and collect best params
+            for (config_name, boundary), results in gs_data.items():
+                gs_dir = os.path.join(
+                    SCRIPT_DIR, "datasets", dataset,
+                    "same_size_results", config_name
+                )
+                gs_file = os.path.join(
+                    gs_dir, f"central_grid_search_n{boundary}.csv"
+                )
+                gs_df = pd.DataFrame(results)
+                gs_df.to_csv(gs_file, index=False)
+                gs_loaded[(config_name, boundary)] = gs_df
+                print(f"  [SAVED] Grid search: {config_name} "
+                      f"n={boundary} ({len(results)} results)")
+        else:
+            print("  All grid searches already completed.")
+
+        # Find best params for each group
+        best_params = {}
+        for (config_name, boundary), gs_df in gs_loaded.items():
+            best_lr, best_bs = _find_best_params(gs_df)
+            best_params[(config_name, boundary)] = (best_lr, best_bs)
+            print(f"  BEST for {config_name} n={boundary}: "
+                  f"LR={best_lr} BS={best_bs}")
+
+        # ── PHASE 2: All Group Runs in Parallel ──────────────────────────
+        print(f"\n{'='*60}")
+        print(f"PHASE 2: Group Runs (all configs/groups/nodes/iters in parallel)")
+        print(f"{'='*60}")
+
+        results_dir = os.path.join(SCRIPT_DIR, "results", dataset)
+        os.makedirs(results_dir, exist_ok=True)
+        results_file = os.path.join(results_dir, "central_results.csv")
+
+        # Load existing results for skip checks
+        if os.path.exists(results_file):
+            existing_df = pd.read_csv(results_file)
+        else:
+            existing_df = pd.DataFrame(columns=[
+                'datetime', 'configuration', 'num_nodes',
+                'iteration', 'lr', 'batch_size', 'epochs',
+                'loss', 'auc', 'auprc', 'accuracy',
+                'precision', 'recall'
+            ])
+
+        # Collect all run tasks across all configs/groups
+        run_tasks = []
+        run_meta = []
+
+        for config_name, max_nodes in configs.items():
+            config_dir = os.path.join(dataset_dir, "same_size", config_name)
+            if not os.path.isdir(config_dir):
+                continue
+
+            for group_end in range(GROUP_SIZE, max_nodes + 1, GROUP_SIZE):
+                group_start = max(2, group_end - GROUP_SIZE + 1)
+
+                if (config_name, group_end) not in best_params:
+                    print(f"  WARNING: No best params for "
+                          f"{config_name} n={group_end}, skipping group")
                     continue
 
-                print(f"\n--- Group: num_nodes = [{group_start}..{group_end}] ---")
+                lr, bs = best_params[(config_name, group_end)]
 
-                # Phase 1: Grid search at boundary
-                if restart_active and RESTART_LR is not None and RESTART_BS is not None:
-                    best_lr, best_bs = RESTART_LR, RESTART_BS
-                    print(f"  [RESTART] Using provided LR={best_lr} BS={best_bs}, skipping grid search")
-                else:
-                    best_lr, best_bs = grid_search(dataset, config_name, group_end)
+                for num_nodes in range(group_start, group_end + 1):
+                    for iteration in range(NUM_ITERATIONS):
+                        # Skip if already computed (resumability)
+                        mask = (
+                            (existing_df['configuration'] == config_name)
+                            & (existing_df['num_nodes'] == num_nodes)
+                            & (existing_df['iteration'] == iteration)
+                        )
+                        if mask.any():
+                            continue
 
-                # Phase 2: Run central for all nodes in this group
-                nodes_range = range(group_start, group_end + 1)
-                start_n = RESTART_NUM_NODES if restart_active else None
-                start_i = RESTART_ITERATION if restart_active else None
-                run_central_group(dataset, config_name, nodes_range, best_lr, best_bs, start_n, start_i)
+                        run_tasks.append((
+                            dataset, config_name, num_nodes,
+                            iteration, lr, bs
+                        ))
+                        run_meta.append((
+                            config_name, num_nodes, iteration, lr, bs
+                        ))
 
-                # Deactivate restart after processing the restart group
-                if restart_active:
-                    restart_active = False
+        # Execute all run tasks in parallel
+        if run_tasks:
+            print(f"\n  Submitting {len(run_tasks)} run experiments "
+                  f"to {workers} workers...")
+            ctx = mp.get_context("spawn")
+            with ctx.Pool(
+                processes=workers, initializer=_init_worker
+            ) as pool:
+                run_results = pool.map(
+                    _central_experiment_worker, run_tasks, chunksize=1
+                )
+
+            # Collect new result rows
+            new_rows = []
+            for (config, nn, it, lr, bs), metrics in zip(
+                run_meta, run_results
+            ):
+                if metrics is not None:
+                    new_rows.append({
+                        'datetime': datetime.now().strftime(
+                            '%Y-%m-%d %H:%M:%S'
+                        ),
+                        'configuration': config,
+                        'num_nodes': nn,
+                        'iteration': it,
+                        'lr': lr,
+                        'batch_size': bs,
+                        'epochs': EPOCHS,
+                        'loss': metrics['loss'],
+                        'auc': metrics['auc'],
+                        'auprc': metrics['auprc'],
+                        'accuracy': metrics['accuracy'],
+                        'precision': metrics['precision'],
+                        'recall': metrics['recall'],
+                    })
+
+            if new_rows:
+                new_df = pd.DataFrame(new_rows)
+                all_df = pd.concat(
+                    [existing_df, new_df], ignore_index=True
+                )
+                # Sort to match sequential output order
+                all_df = all_df.sort_values(
+                    by=['configuration', 'num_nodes', 'iteration']
+                ).reset_index(drop=True)
+                all_df.to_csv(results_file, index=False)
+                print(f"\n  Results saved: {results_file} "
+                      f"({len(new_rows)} new rows)")
+            else:
+                print("  All experiments returned None.")
+        else:
+            print("  No new experiments to run.")
 
     print(f"\n{'#'*60}")
     print(f"ALL EXPERIMENTS COMPLETED - {datetime.now()}")

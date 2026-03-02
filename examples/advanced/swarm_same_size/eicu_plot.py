@@ -1,50 +1,44 @@
 #!/usr/bin/env python3
 """
-Generate comparison plots for local, central and swarm experiments.
+Generate comparison plots for local, central and swarm experiments on eICU.
 
-Creates 2 images:
-  - plots_results/plot_auc.png   (AUC vs num_nodes)
-  - plots_results/plot_loss.png  (Loss vs num_nodes)
+Creates 3 kinds of images in plots_results/eicu:
+  - per-configuration plots for AUC/Loss/Time (own x-range and aligned x-range)
+  - swarm-only comparison plots for AUC/Loss/Time across configurations
 
-Each image contains 4 vertically-stacked subplots (5nodes, 10nodes, 20nodes, 40nodes).
+Each per-configuration image contains vertically-stacked subplots
+(5nodes, 10nodes, 20nodes).
 Three lines per subplot: Local (mean across nodes), Central, Swarm (mean across sites).
 Shaded bands show ±1 std.
 """
 
 import os
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
 from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 
 # ── Configuration ──────────────────────────────────────────────────────
 CONFIGS = {
-    "mimic_iv": [
-        {"name": "5nodes",  "max_nodes": 5,  "label": "5 nodes - 8000 rows/node"},
-        {"name": "10nodes", "max_nodes": 10, "label": "10 nodes - 4000 rows/node"},
-        {"name": "20nodes", "max_nodes": 20, "label": "20 nodes - 2000 rows/node"},
-        {"name": "40nodes", "max_nodes": 40, "label": "40 nodes - 1000 rows/node"},
-        {"name": "80nodes", "max_nodes": 80, "label": "80 nodes - 500 rows/node"},
-    ],
-    "mimic_iii": [
-        {"name": "5nodes",  "max_nodes": 5,  "label": "5 nodes - 2500 rows/node"},
+    "eicu": [
+        {"name": "5nodes", "max_nodes": 5, "label": "5 nodes - 2500 rows/node"},
         {"name": "10nodes", "max_nodes": 10, "label": "10 nodes - 1250 rows/node"},
         {"name": "20nodes", "max_nodes": 20, "label": "20 nodes - 625 rows/node"},
-        {"name": "40nodes", "max_nodes": 40, "label": "40 nodes - 312 rows/node"},
-        {"name": "80nodes", "max_nodes": 80, "label": "80 nodes - 156 rows/node"},
-    ],
-    "mimic_iv_fixed": [
-        {"name": "5nodes",  "max_nodes": 5,  "label": "5 nodes - 2500 rows/node"},
-        {"name": "10nodes", "max_nodes": 10, "label": "10 nodes - 1250 rows/node"},
-        {"name": "20nodes", "max_nodes": 20, "label": "20 nodes - 625 rows/node"},
-        {"name": "40nodes", "max_nodes": 40, "label": "40 nodes - 312 rows/node"},
-        {"name": "80nodes", "max_nodes": 80, "label": "80 nodes - 156 rows/node"},
+        {"name": "25nodes", "max_nodes": 25, "label": "25 nodes - 500 rows/node"},
     ],
 }
 
 SCRIPT_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 RESULTS_DIR = SCRIPT_DIR / "results"
 OUTPUT_DIR = SCRIPT_DIR / "plots_results"
+
+
+def _drop_zero_auc_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop rows with auc == 0 when auc column exists."""
+    if df.empty or "auc" not in df.columns:
+        return df
+    return df[df["auc"] != 0].copy()
 
 
 def load_and_aggregate(csv_path: Path, group_cols: list[str], metric: str):
@@ -62,20 +56,38 @@ def load_and_aggregate(csv_path: Path, group_cols: list[str], metric: str):
 
 
 def plot_metric(metric: str, ylabel: str, output_filename: str, dataset: str, ylim: tuple = None, shared_x: bool = False):
-    """Create a 4-row figure for the given metric and save to disk.
-    If shared_x=True, all subplots use x-axis 2..80.
+    """Create a multi-row figure for the given metric and save to disk.
+    If shared_x=True, all subplots use x-axis 2..global_max.
     """
 
     # Load CSVs once
-    local_df = pd.read_csv(RESULTS_DIR / dataset / "local_results.csv") if (RESULTS_DIR / dataset / "local_results.csv").is_file() else pd.DataFrame()
-    central_df = pd.read_csv(RESULTS_DIR / dataset / "central_results.csv") if (RESULTS_DIR / dataset / "central_results.csv").is_file() else pd.DataFrame()
-    swarm_df = pd.read_csv(RESULTS_DIR / dataset / "swarm_results.csv") if (RESULTS_DIR / dataset / "swarm_results.csv").is_file() else pd.DataFrame()
+    local_df = (
+        pd.read_csv(RESULTS_DIR / dataset / "local_results.csv")
+        if (RESULTS_DIR / dataset / "local_results.csv").is_file()
+        else pd.DataFrame()
+    )
+    central_df = (
+        pd.read_csv(RESULTS_DIR / dataset / "central_results.csv")
+        if (RESULTS_DIR / dataset / "central_results.csv").is_file()
+        else pd.DataFrame()
+    )
+    swarm_df = (
+        pd.read_csv(RESULTS_DIR / dataset / "swarm_results.csv")
+        if (RESULTS_DIR / dataset / "swarm_results.csv").is_file()
+        else pd.DataFrame()
+    )
 
-    global_max = max(c["max_nodes"] for c in CONFIGS[dataset])  # 80
-    n_rows = len(CONFIGS[dataset])
-    fig, axes = plt.subplots(n_rows, 1, figsize=(16, 15 * n_rows / 4))
+    local_df = _drop_zero_auc_rows(local_df)
+    central_df = _drop_zero_auc_rows(central_df)
+    swarm_df = _drop_zero_auc_rows(swarm_df)
 
-    for idx, cfg in enumerate(CONFIGS[dataset]):
+    cfgs = CONFIGS[dataset]
+    global_max = max(c["max_nodes"] for c in cfgs)
+    fig, axes = plt.subplots(len(cfgs), 1, figsize=(16, 4 * len(cfgs)))
+    if len(cfgs) == 1:
+        axes = [axes]
+
+    for idx, cfg in enumerate(cfgs):
         ax = axes[idx]
         config_name = cfg["name"]
         max_nodes = cfg["max_nodes"]
@@ -88,7 +100,13 @@ def plot_metric(metric: str, ylabel: str, output_filename: str, dataset: str, yl
             loc_agg = loc.groupby("num_nodes")[metric].agg(["mean", "std"]).reset_index()
             loc_agg = loc_agg.set_index("num_nodes").reindex(x_range).reset_index()
             ax.plot(loc_agg["num_nodes"], loc_agg["mean"], "o-", color="#e74c3c", label="Local", linewidth=2, markersize=4)
-            ax.fill_between(loc_agg["num_nodes"], loc_agg["mean"] - loc_agg["std"], loc_agg["mean"] + loc_agg["std"], color="#e74c3c", alpha=0.15)
+            # ax.fill_between(
+            #     loc_agg["num_nodes"],
+            #     loc_agg["mean"] - loc_agg["std"],
+            #     loc_agg["mean"] + loc_agg["std"],
+            #     color="#e74c3c",
+            #     alpha=0.15,
+            # )
 
         # ── Central ──
         if not central_df.empty and config_name in central_df["configuration"].values:
@@ -96,7 +114,13 @@ def plot_metric(metric: str, ylabel: str, output_filename: str, dataset: str, yl
             cen_agg = cen.groupby("num_nodes")[metric].agg(["mean", "std"]).reset_index()
             cen_agg = cen_agg.set_index("num_nodes").reindex(x_range).reset_index()
             ax.plot(cen_agg["num_nodes"], cen_agg["mean"], "s-", color="#2ecc71", label="Central", linewidth=2, markersize=4)
-            ax.fill_between(cen_agg["num_nodes"], cen_agg["mean"] - cen_agg["std"], cen_agg["mean"] + cen_agg["std"], color="#2ecc71", alpha=0.15)
+            # ax.fill_between(
+            #     cen_agg["num_nodes"],
+            #     cen_agg["mean"] - cen_agg["std"],
+            #     cen_agg["mean"] + cen_agg["std"],
+            #     color="#2ecc71",
+            #     alpha=0.15,
+            # )
 
         # ── Swarm ──
         if not swarm_df.empty and config_name in swarm_df["configuration"].values:
@@ -104,12 +128,18 @@ def plot_metric(metric: str, ylabel: str, output_filename: str, dataset: str, yl
             swm_agg = swm.groupby("num_nodes")[metric].agg(["mean", "std"]).reset_index()
             swm_agg = swm_agg.set_index("num_nodes").reindex(x_range).reset_index()
             ax.plot(swm_agg["num_nodes"], swm_agg["mean"], "^-", color="#3498db", label="Swarm", linewidth=2, markersize=4)
-            ax.fill_between(swm_agg["num_nodes"], swm_agg["mean"] - swm_agg["std"], swm_agg["mean"] + swm_agg["std"], color="#3498db", alpha=0.15)
+            # ax.fill_between(
+            #     swm_agg["num_nodes"],
+            #     swm_agg["mean"] - swm_agg["std"],
+            #     swm_agg["mean"] + swm_agg["std"],
+            #     color="#3498db",
+            #     alpha=0.15,
+            # )
 
         # ── Axes formatting ──
         ax.set_xlim(1.5, x_axis_max + 0.5)
         ax.set_xticks(np.arange(2, (global_max if shared_x else max_nodes) + 1))
-        ax.tick_params(axis='x', labelsize=7)
+        ax.tick_params(axis="x", labelsize=7)
         ax.set_xlabel("Number of nodes", fontsize=12, fontweight="bold")
         ax.set_ylabel(ylabel, fontsize=12, fontweight="bold")
         ax.set_title(cfg["label"], fontsize=13, fontweight="bold", pad=8)
@@ -175,13 +205,13 @@ def _get_params_from_results(df, config_name, num_nodes):
     All rows for the same (config, num_nodes) share the same hyperparameters,
     so we just take the first row.  Returns (lr, bs) or None.
     """
-    if df.empty or 'lr' not in df.columns or 'batch_size' not in df.columns:
+    if df.empty or "lr" not in df.columns or "batch_size" not in df.columns:
         return None
-    sub = df[(df['configuration'] == config_name) & (df['num_nodes'] == num_nodes)]
+    sub = df[(df["configuration"] == config_name) & (df["num_nodes"] == num_nodes)]
     if sub.empty:
         return None
     row = sub.iloc[0]
-    return row['lr'], int(row['batch_size'])
+    return row["lr"], int(row["batch_size"])
 
 
 def _annotate_hyperparams(ax, dataset, config_name, max_nodes, local_df, central_df, swarm_df):
@@ -202,9 +232,18 @@ def _annotate_hyperparams(ax, dataset, config_name, max_nodes, local_df, central
             break
     if local_params:
         lr, bs = local_params
-        ax.text(0.02, 0.04, f"Local: lr={lr:g}  bs={bs}",
-                transform=ax.transAxes, fontsize=10, va='bottom', ha='left', color='#e74c3c', fontweight='bold',
-                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor='#e74c3c', alpha=0.85, linewidth=0.6))
+        ax.text(
+            0.02,
+            0.04,
+            f"Local: lr={lr:g}  bs={bs}",
+            transform=ax.transAxes,
+            fontsize=10,
+            va="bottom",
+            ha="left",
+            color="#e74c3c",
+            fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="#e74c3c", alpha=0.85, linewidth=0.6),
+        )
 
     # Per-group annotations for swarm & central
     for group_end in range(GROUP_SIZE, max_nodes + 1, GROUP_SIZE):
@@ -212,11 +251,11 @@ def _annotate_hyperparams(ax, dataset, config_name, max_nodes, local_df, central
 
         # Alternating background bands
         if (group_end // GROUP_SIZE) % 2 == 0:
-            ax.axvspan(group_start - 0.5, group_end + 0.5, alpha=0.04, color='steelblue', zorder=0)
+            ax.axvspan(group_start - 0.5, group_end + 0.5, alpha=0.04, color="steelblue", zorder=0)
 
         # Vertical separator at group boundary
         if group_end < max_nodes:
-            ax.axvline(x=group_end + 0.5, color='gray', linestyle=':', alpha=0.4, linewidth=0.8)
+            ax.axvline(x=group_end + 0.5, color="gray", linestyle=":", alpha=0.4, linewidth=0.8)
 
         # Pick params from any num_nodes in this group (they all share the same)
         swarm_params = None
@@ -231,31 +270,57 @@ def _annotate_hyperparams(ax, dataset, config_name, max_nodes, local_df, central
         parts = []
         if swarm_params:
             lr, bs = swarm_params
-            parts.append((f"S: lr={lr:g} bs={bs}", '#3498db'))
+            parts.append((f"S: lr={lr:g} bs={bs}", "#3498db"))
         if central_params:
             lr, bs = central_params
-            parts.append((f"C: lr={lr:g} bs={bs}", '#2ecc71'))
+            parts.append((f"C: lr={lr:g} bs={bs}", "#2ecc71"))
 
         for i, (text, color) in enumerate(parts):
             y_pos = 0.96 - i * 0.09
-            ax.text(x_center, y_pos, text, transform=trans,
-                    fontsize=10, ha='center', va='top',
-                    color=color, fontweight='bold',
-                    bbox=dict(boxstyle='round,pad=0.2', facecolor='white', edgecolor=color, alpha=0.8, linewidth=0.5))
+            ax.text(
+                x_center,
+                y_pos,
+                text,
+                transform=trans,
+                fontsize=10,
+                ha="center",
+                va="top",
+                color=color,
+                fontweight="bold",
+                bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor=color, alpha=0.8, linewidth=0.5),
+            )
 
 
 def plot_time(dataset: str, shared_x: bool = False):
-    """Create a 4-row figure with mean iteration time (minutes) vs num_nodes."""
+    """Create a multi-row figure with mean iteration time (minutes) vs num_nodes."""
 
-    local_df = pd.read_csv(RESULTS_DIR / dataset / "local_results.csv") if (RESULTS_DIR / dataset / "local_results.csv").is_file() else pd.DataFrame()
-    central_df = pd.read_csv(RESULTS_DIR / dataset / "central_results.csv") if (RESULTS_DIR / dataset / "central_results.csv").is_file() else pd.DataFrame()
-    swarm_df = pd.read_csv(RESULTS_DIR / dataset / "swarm_results.csv") if (RESULTS_DIR / dataset / "swarm_results.csv").is_file() else pd.DataFrame()
+    local_df = (
+        pd.read_csv(RESULTS_DIR / dataset / "local_results.csv")
+        if (RESULTS_DIR / dataset / "local_results.csv").is_file()
+        else pd.DataFrame()
+    )
+    central_df = (
+        pd.read_csv(RESULTS_DIR / dataset / "central_results.csv")
+        if (RESULTS_DIR / dataset / "central_results.csv").is_file()
+        else pd.DataFrame()
+    )
+    swarm_df = (
+        pd.read_csv(RESULTS_DIR / dataset / "swarm_results.csv")
+        if (RESULTS_DIR / dataset / "swarm_results.csv").is_file()
+        else pd.DataFrame()
+    )
 
-    global_max = max(c["max_nodes"] for c in CONFIGS[dataset])
-    n_rows = len(CONFIGS[dataset])
-    fig, axes = plt.subplots(n_rows, 1, figsize=(16, 15 * n_rows / 4))
+    local_df = _drop_zero_auc_rows(local_df)
+    central_df = _drop_zero_auc_rows(central_df)
+    swarm_df = _drop_zero_auc_rows(swarm_df)
 
-    for idx, cfg in enumerate(CONFIGS[dataset]):
+    cfgs = CONFIGS[dataset]
+    global_max = max(c["max_nodes"] for c in cfgs)
+    fig, axes = plt.subplots(len(cfgs), 1, figsize=(16, 4 * len(cfgs)))
+    if len(cfgs) == 1:
+        axes = [axes]
+
+    for idx, cfg in enumerate(cfgs):
         ax = axes[idx]
         config_name = cfg["name"]
         max_nodes = cfg["max_nodes"]
@@ -280,7 +345,7 @@ def plot_time(dataset: str, shared_x: bool = False):
         # Axes formatting
         ax.set_xlim(1.5, x_axis_max + 0.5)
         ax.set_xticks(np.arange(2, (global_max if shared_x else max_nodes) + 1))
-        ax.tick_params(axis='x', labelsize=7)
+        ax.tick_params(axis="x", labelsize=7)
         ax.set_xlabel("Number of nodes", fontsize=12, fontweight="bold")
         ax.set_ylabel("Time per iteration (min)", fontsize=12, fontweight="bold")
         ax.set_title(cfg["label"], fontsize=13, fontweight="bold", pad=8)
@@ -303,15 +368,14 @@ def plot_time(dataset: str, shared_x: bool = False):
 
 # ── Swarm comparison: all configs on one graph ─────────────────────────
 SWARM_COLORS = {
-    "5nodes":  "#f39c12",
+    "5nodes": "#f39c12",
     "10nodes": "#e74c3c",
     "20nodes": "#2ecc71",
-    "40nodes": "#3498db",
-    "80nodes": "#9b59b6",
+    "25nodes": "#3498db",
 }
 
 
-def plot_swarm_comparison_nodes(metric: str, ylabel: str, output_filename: str, dataset: str, ylim: tuple = None):
+def plot_swarm_comparison(metric: str, ylabel: str, output_filename: str, dataset: str, ylim: tuple = None):
     """Single graph with one line per configuration (swarm only)."""
     swarm_csv = RESULTS_DIR / dataset / "swarm_results.csv"
     if not swarm_csv.is_file():
@@ -319,6 +383,7 @@ def plot_swarm_comparison_nodes(metric: str, ylabel: str, output_filename: str, 
         return
 
     swarm_df = pd.read_csv(swarm_csv)
+    swarm_df = _drop_zero_auc_rows(swarm_df)
     fig, ax = plt.subplots(figsize=(16, 6))
 
     for cfg in CONFIGS[dataset]:
@@ -334,69 +399,15 @@ def plot_swarm_comparison_nodes(metric: str, ylabel: str, output_filename: str, 
         agg = agg.set_index("num_nodes").reindex(x_range).reset_index()
 
         color = SWARM_COLORS[config_name]
-        ax.plot(agg["num_nodes"], agg["mean"], "o-", color=color,
-                label=cfg["label"], linewidth=2, markersize=4)
+        ax.plot(agg["num_nodes"], agg["mean"], "o-", color=color, label=cfg["label"], linewidth=2, markersize=4)
 
     global_max = max(c["max_nodes"] for c in CONFIGS[dataset])
     ax.set_xlim(1.5, global_max + 0.5)
     ax.set_xticks(np.arange(2, global_max + 1))
-    ax.tick_params(axis='x', labelsize=7)
+    ax.tick_params(axis="x", labelsize=7)
     ax.set_xlabel("Number of nodes", fontsize=12, fontweight="bold")
     ax.set_ylabel(ylabel, fontsize=12, fontweight="bold")
     ax.set_title(f"Swarm Learning – {ylabel} comparison", fontsize=14, fontweight="bold", pad=10)
-    if ylim:
-        ax.set_ylim(ylim)
-    ax.legend(fontsize=11, loc="best")
-    ax.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    (OUTPUT_DIR / dataset).mkdir(parents=True, exist_ok=True)
-    out_path = OUTPUT_DIR / dataset / output_filename
-    fig.savefig(str(out_path), dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Saved: {out_path}")
-
-
-def plot_swarm_comparison_rows(metric: str, ylabel: str, output_filename: str, dataset: str, ylim: tuple = None):
-    """Single graph with one line per configuration (swarm only), x-axis is total rows."""
-    swarm_csv = RESULTS_DIR / dataset / "swarm_results.csv"
-    if not swarm_csv.is_file():
-        print(f"WARNING: {swarm_csv} not found – skipping swarm comparison")
-        return
-
-    swarm_df = pd.read_csv(swarm_csv)
-    fig, ax = plt.subplots(figsize=(16, 6))
-
-    max_total_rows = 0
-
-    for cfg in CONFIGS[dataset]:
-        config_name = cfg["name"]
-        max_nodes = cfg["max_nodes"]
-        x_range = np.arange(2, max_nodes + 1)
-
-        if config_name not in swarm_df["configuration"].values:
-            continue
-
-        rows_per_node = _rows_per_node_from_label(cfg["label"])
-
-        sub = swarm_df[swarm_df["configuration"] == config_name]
-        agg = sub.groupby("num_nodes")[metric].agg(["mean", "std"]).reset_index()
-        agg = agg.set_index("num_nodes").reindex(x_range).reset_index()
-        agg["total_rows"] = agg["num_nodes"] * rows_per_node
-
-        color = SWARM_COLORS[config_name]
-        ax.plot(agg["total_rows"], agg["mean"], "o-", color=color,
-                label=cfg["label"], linewidth=2, markersize=4)
-
-        current_max = rows_per_node * max_nodes
-        if current_max > max_total_rows:
-            max_total_rows = current_max
-
-    ax.set_xlim(-max_total_rows * 0.01, max_total_rows * 1.01)
-    ax.tick_params(axis='x', labelsize=8)
-    ax.set_xlabel("Total number of rows", fontsize=12, fontweight="bold")
-    ax.set_ylabel(ylabel, fontsize=12, fontweight="bold")
-    ax.set_title(f"Swarm Learning – {ylabel} comparison by total rows", fontsize=14, fontweight="bold", pad=10)
     if ylim:
         ax.set_ylim(ylim)
     ax.legend(fontsize=11, loc="best")
@@ -418,6 +429,7 @@ def plot_swarm_time_comparison(dataset: str):
         return
 
     swarm_df = pd.read_csv(swarm_csv)
+    swarm_df = _drop_zero_auc_rows(swarm_df)
     fig, ax = plt.subplots(figsize=(16, 6))
 
     global_max = max(c["max_nodes"] for c in CONFIGS[dataset])
@@ -432,12 +444,11 @@ def plot_swarm_time_comparison(dataset: str):
             continue
 
         color = SWARM_COLORS[config_name]
-        ax.plot(time_data["num_nodes"], time_data["mean_minutes"], "o-",
-                color=color, label=cfg["label"], linewidth=2, markersize=4)
+        ax.plot(time_data["num_nodes"], time_data["mean_minutes"], "o-", color=color, label=cfg["label"], linewidth=2, markersize=4)
 
     ax.set_xlim(1.5, global_max + 0.5)
     ax.set_xticks(np.arange(2, global_max + 1))
-    ax.tick_params(axis='x', labelsize=7)
+    ax.tick_params(axis="x", labelsize=7)
     ax.set_xlabel("Number of nodes", fontsize=12, fontweight="bold")
     ax.set_ylabel("Time per iteration (min)", fontsize=12, fontweight="bold")
     ax.set_title("Swarm Learning – Time per iteration comparison", fontsize=14, fontweight="bold", pad=10)
@@ -454,33 +465,24 @@ def plot_swarm_time_comparison(dataset: str):
     print(f"Saved: {out_path}")
 
 
-def _rows_per_node_from_label(label: str) -> int:
-    """Extract rows/node integer from labels like '5 nodes - 8000 rows/node'."""
-    rows_part = label.split("-")[-1].strip().split(" ")[0]
-    return int(rows_part)
-
-
 def main(dataset: str):
     # Per-config plots (own x-range)
-    # plot_metric("auc", "AUC (mean)", f"own_x_plot_auc.png", dataset, ylim=(0.6, 0.95))
-    # plot_metric("loss", "Loss (mean)", f"own_x_plot_loss.png", dataset, ylim=(0.15, 0.5))
-    # plot_time(dataset)
- 
-    # Per-config plots (aligned x-range 2..40)
-    plot_metric("auc", "AUC (mean)", f"aligned_x_plot_auc.png", dataset, ylim=(0.6, 0.95), shared_x=True)
-    # plot_metric("loss", "Loss (mean)", f"aligned_x_plot_loss.png", dataset, ylim=(0.15, 0.5), shared_x=True)
-    # plot_time(dataset, shared_x=True)
- 
+    plot_metric("auc", "AUC (mean)", "own_x_plot_auc.png", dataset, ylim=(0.6, 0.95))
+    plot_metric("loss", "Loss (mean)", "own_x_plot_loss.png", dataset, ylim=(0.15, 0.5))
+    plot_time(dataset)
+
+    # Per-config plots (aligned x-range 2..global_max)
+    plot_metric("auc", "AUC (mean)", "aligned_x_plot_auc.png", dataset, ylim=(0.6, 0.95), shared_x=True)
+    plot_metric("loss", "Loss (mean)", "aligned_x_plot_loss.png", dataset, ylim=(0.15, 0.5), shared_x=True)
+    plot_time(dataset, shared_x=True)
+
     # Swarm comparison (all configs on one graph)
-    plot_swarm_comparison_nodes("auc", "AUC (mean)", f"swarm_comparison_nodes_plot_auc.png", dataset, ylim=(0.6, 0.95))
-    plot_swarm_comparison_rows("auc", "AUC (mean)", f"swarm_comparison_rows_plot_auc.png", dataset, ylim=(0.6, 0.95))
-    # plot_swarm_comparison_nodes("loss", "Loss (mean)", f"swarm_comparison_plot_loss.png", dataset, ylim=(0.15, 0.5))
-    # plot_swarm_time_comparison(dataset)
+    plot_swarm_comparison("auc", "AUC (mean)", "swarm_comparison_plot_auc.png", dataset, ylim=(0.6, 0.95))
+    plot_swarm_comparison("loss", "Loss (mean)", "swarm_comparison_plot_loss.png", dataset, ylim=(0.15, 0.5))
+    plot_swarm_time_comparison(dataset)
 
     print("\nDone - all plots created.")
 
 
 if __name__ == "__main__":
-    main("mimic_iii")
-    main("mimic_iv")
-    main("mimic_iv_fixed")
+    main("eicu")

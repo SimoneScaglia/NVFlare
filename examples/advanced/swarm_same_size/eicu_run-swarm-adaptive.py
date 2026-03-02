@@ -43,9 +43,20 @@ Workflow:
       Grid search at n=15 -> best params used for num_nodes = 11,12,13,14,15
       Grid search at n=20 -> best params used for num_nodes = 16,17,18,19,20
 
+Checkpointing / resumability:
+  - Grid search results are saved row-by-row; interrupted runs resume from
+    the last completed (batch_size, learning_rate, iteration) triple.
+  - Swarm results are saved after each (num_nodes, iteration); the CSV is
+    reloaded on restart and completed entries are skipped automatically.
+  - Use --resume-config / --resume-num-nodes / --resume-iteration to skip
+    directly to a known restart point without replaying the CSV-check loop.
+
 Usage:
-    python eicu_run-swarm-adaptive.py                     # all configs
-    python eicu_run-swarm-adaptive.py --config 10nodes    # single config
+    python eicu_run-swarm-adaptive.py                                    # all configs
+    python eicu_run-swarm-adaptive.py --config 10nodes                   # single config
+    python eicu_run-swarm-adaptive.py --resume-config 20nodes            # resume a config
+    python eicu_run-swarm-adaptive.py --resume-config 20nodes \
+        --resume-num-nodes 12 --resume-iteration 3                       # precise resume
 """
 
 import argparse
@@ -71,11 +82,9 @@ GRID_SEARCH_ITERS = 3        # random iterations used in grid search
 GROUP_SIZE = 5                # re-tune hyperparameters every N nodes
 
 BATCH_SIZES = [16, 32, 64, 128, 256, 512]
-LRS = [0.0001, 0.001, 0.01, 0.1]
+LRS = [0.001, 0.01, 0.1]
 
 CONFIGS = {
-    "5nodes":  5,
-    "10nodes": 10,
     "20nodes": 20,
     "25nodes": 25,
 }
@@ -90,7 +99,7 @@ CONFIG_FILE = os.path.normpath(os.path.join(
 ))
 
 # Add mimic networks to path for FCN model
-sys.path.insert(0, os.path.join(SWARM_TF_DIR, "code", "mimic", "networks"))
+sys.path.insert(0, os.path.join(SWARM_TF_DIR, "..", "mimic", "networks"))
 from mimic_nets import FCN  # noqa: E402
 
 
@@ -310,38 +319,72 @@ def grid_search(config_name, num_nodes, available_hospitals):
 
     Tries all (batch_size, learning_rate) combinations with 3 random iterations.
     Returns (best_lr, best_bs) and saves results CSV for heatmap.
+
+    Checkpointing: results are saved incrementally after each
+    (batch_size, learning_rate, iteration) triple so that an interrupted
+    grid search can be resumed without repeating completed work.
     """
     gs_dir = os.path.join(SCRIPT_DIR, "datasets", "eicu", "data_fixed_rows_results", config_name)
     os.makedirs(gs_dir, exist_ok=True)
     gs_file = os.path.join(gs_dir, f"grid_search_n{num_nodes}.csv")
 
+    # Pick 3 random iterations (deterministic per boundary for reproducibility)
+    rng = random.Random(SEED + num_nodes + hash(config_name))
+    iterations = sorted(rng.sample(range(NUM_ITERATIONS), GRID_SEARCH_ITERS))
+    all_combos = {(bs, lr, it) for bs in BATCH_SIZES for lr in LRS for it in iterations}
+
+    # Load existing partial or complete results
     if os.path.exists(gs_file):
-        print(f"\n  Grid search already completed: {gs_file}")
-        gs_df = pd.read_csv(gs_file)
-        if len(gs_df) > 0:
-            best_lr, best_bs = _find_best_params(gs_df)
+        gs_df_existing = pd.read_csv(gs_file)
+    else:
+        gs_df_existing = pd.DataFrame()
+
+    if len(gs_df_existing) > 0:
+        done_combos = set(
+            zip(
+                gs_df_existing['batch_size'],
+                gs_df_existing['learning_rate'],
+                gs_df_existing['iteration'],
+            )
+        )
+        if all_combos.issubset(done_combos):
+            print(f"\n  Grid search already completed: {gs_file}")
+            best_lr, best_bs = _find_best_params(gs_df_existing)
             print(f"  Loaded best params: LR={best_lr} BS={best_bs}")
             return best_lr, best_bs
-        print(f"  File empty, re-running grid search...")
+        remaining = len(all_combos - done_combos)
+        print(f"\n  Grid search partially done "
+              f"({len(done_combos)}/{len(all_combos)} combos). "
+              f"Resuming {remaining} remaining...")
+        gs_results = gs_df_existing.to_dict('records')
+    else:
+        done_combos = set()
+        gs_results = []
 
     print(f"\n{'='*60}")
     print(f"SWARM GRID SEARCH (eICU): config={config_name} num_nodes={num_nodes}")
     print(f"Hyperparameters: BS={BATCH_SIZES} LR={LRS}")
     print(f"{'='*60}")
-
-    # Pick 3 random iterations (deterministic per boundary for reproducibility)
-    rng = random.Random(SEED + num_nodes + hash(config_name))
-    iterations = sorted(rng.sample(range(NUM_ITERATIONS), GRID_SEARCH_ITERS))
     print(f"Selected iterations for grid search: {iterations}")
 
-    gs_results = []
     total = len(BATCH_SIZES) * len(LRS) * len(iterations)
-    done = 0
+    done = len(done_combos)
 
     for bs in BATCH_SIZES:
         for lr in LRS:
             combo_aucs = []
             for iteration in iterations:
+                if (bs, lr, iteration) in done_combos:
+                    # Recover AUC values from existing results for summary
+                    for row in gs_results:
+                        if (row['batch_size'] == bs
+                                and row['learning_rate'] == lr
+                                and row['iteration'] == iteration):
+                            combo_aucs.append(row['auc'])
+                    done += 1
+                    print(f"  [SKIP] BS={bs} LR={lr} Iter={iteration} (already done)")
+                    continue
+
                 done += 1
                 selected = select_hospitals(available_hospitals, num_nodes, iteration)
                 print(f"\n  [{done}/{total}] BS={bs} LR={lr} Iter={iteration} "
@@ -352,7 +395,7 @@ def grid_search(config_name, num_nodes, available_hospitals):
                 )
 
                 for site_id, hid, m in site_results:
-                    gs_results.append({
+                    row = {
                         'num_nodes': num_nodes,
                         'iteration': iteration,
                         'site_id': site_id,
@@ -365,18 +408,22 @@ def grid_search(config_name, num_nodes, available_hospitals):
                         'accuracy': m['accuracy'],
                         'precision': m['precision'],
                         'recall': m['recall'],
-                    })
+                    }
+                    gs_results.append(row)
                     combo_aucs.append(m['auc'])
+
+                done_combos.add((bs, lr, iteration))
+
+                # ── Incremental save after each (bs, lr, iteration) ──────
+                pd.DataFrame(gs_results).to_csv(gs_file, index=False)
 
             avg_auc = np.mean(combo_aucs) if combo_aucs else 0
             print(f"  -> Avg AUC for BS={bs} LR={lr}: {avg_auc:.4f}")
 
-    # Save grid search results
     gs_df = pd.DataFrame(gs_results)
     gs_df.to_csv(gs_file, index=False)
     print(f"\nGrid search results saved to {gs_file}")
 
-    # Find best hyperparameters
     best_lr, best_bs = _find_best_params(gs_df)
     print(f"\n*** BEST HYPERPARAMETERS: LR={best_lr} BS={best_bs} ***")
 
@@ -394,10 +441,20 @@ def _find_best_params(gs_df):
 
 
 # ── Swarm runs for a group ────────────────────────────────────────────────────
-def run_swarm_group(config_name, num_nodes_range, lr, bs, available_hospitals):
+def run_swarm_group(
+    config_name, num_nodes_range, lr, bs, available_hospitals,
+    resume_num_nodes=None, resume_iteration=None
+):
     """
     Run swarm experiments for a group of num_nodes using given hyperparameters.
     All 10 iterations are executed. Results are appended to swarm_results.csv.
+
+    resume_num_nodes: skip num_nodes strictly below this value.
+    resume_iteration: for the first non-skipped num_nodes, skip iterations
+                      strictly below this value.  Subsequent num_nodes always
+                      start from iteration 0.
+    In both cases the CSV-based skip still applies (already-saved rows are
+    never recomputed regardless of the resume parameters).
     """
     print(f"\n{'='*60}")
     print(f"SWARM RUNS (eICU): config={config_name} "
@@ -418,9 +475,31 @@ def run_swarm_group(config_name, num_nodes_range, lr, bs, available_hospitals):
             'loss', 'auc', 'auprc', 'accuracy', 'precision', 'recall'
         ])
 
+    # Whether the resume_iteration guard has already been passed
+    resume_num_nodes_crossed = False
+
     for num_nodes in num_nodes_range:
-        for iteration in range(NUM_ITERATIONS):
-            # Check if already computed (resumability)
+        # ── Explicit resume-point skip ────────────────────────────────────
+        if resume_num_nodes is not None and num_nodes < resume_num_nodes:
+            print(f"  [RESUME SKIP] Nodes={num_nodes} "
+                  f"(before resume point num_nodes={resume_num_nodes})")
+            continue
+
+        # Determine iteration start for this num_nodes
+        if (
+            not resume_num_nodes_crossed
+            and resume_num_nodes is not None
+            and num_nodes == resume_num_nodes
+            and resume_iteration is not None
+        ):
+            iter_start = resume_iteration
+            print(f"  [RESUME] Nodes={num_nodes}: starting from iteration {iter_start}")
+        else:
+            iter_start = 0
+        resume_num_nodes_crossed = True
+
+        for iteration in range(iter_start, NUM_ITERATIONS):
+            # Check if already computed (CSV-based resumability)
             existing = results_df[
                 (results_df['configuration'] == config_name) &
                 (results_df['num_nodes'] == num_nodes) &
@@ -479,7 +558,52 @@ def main():
         default='all',
         help="Configuration to process (default: all)"
     )
+    # ── Explicit resume parameters ──────────────────────────────────────────
+    parser.add_argument(
+        '--resume-config',
+        choices=list(CONFIGS.keys()),
+        default=None,
+        metavar='CONFIG',
+        help="Resume from this configuration, skipping earlier ones "
+             "(e.g. 20nodes)"
+    )
+    parser.add_argument(
+        '--resume-num-nodes',
+        type=int,
+        default=None,
+        metavar='N',
+        help="Within the resumed config, skip num_nodes values below N "
+             "(requires --resume-config)"
+    )
+    parser.add_argument(
+        '--resume-iteration',
+        type=int,
+        default=None,
+        metavar='I',
+        help="Within the resumed (config, num_nodes), skip iterations below I "
+             "(requires --resume-config and --resume-num-nodes)"
+    )
+    parser.add_argument(
+        '--learning-rate',
+        type=float,
+        default=None,
+        metavar='LR',
+        help="Resuming learning rate for grid search"
+    )
+    parser.add_argument(
+        '--batch-size',
+        type=int,
+        default=None,
+        metavar='BS',
+        help="Resuming batch size for grid search"
+    )
     args = parser.parse_args()
+
+    # ── Validate resume args ─────────────────────────────────────────────────
+    if args.resume_num_nodes is not None and args.resume_config is None:
+        parser.error("--resume-num-nodes requires --resume-config")
+    if args.resume_iteration is not None and args.resume_num_nodes is None:
+        parser.error("--resume-iteration requires --resume-num-nodes")
 
     configs = CONFIGS if args.config == 'all' else {args.config: CONFIGS[args.config]}
 
@@ -489,9 +613,27 @@ def main():
     print(f"Grid search: {len(BATCH_SIZES)} batch_sizes x {len(LRS)} lrs "
           f"x {GRID_SEARCH_ITERS} iterations")
     print(f"Group size: {GROUP_SIZE} (re-tune every {GROUP_SIZE} nodes)")
+    if args.resume_config:
+        print(f"Resume point: config={args.resume_config} "
+              f"num_nodes={args.resume_num_nodes} "
+              f"iteration={args.resume_iteration} "
+              f"lr={args.learning_rate} "
+              f"bs={args.batch_size}")
     print(f"{'#'*60}")
 
+    # Build ordered list of config names to know which ones precede the resume point
+    all_config_names = list(CONFIGS.keys())
+
     for config_name, max_nodes in configs.items():
+        # ── Config-level resume skip ─────────────────────────────────────
+        if args.resume_config is not None:
+            resume_idx = all_config_names.index(args.resume_config)
+            config_idx = all_config_names.index(config_name)
+            if config_idx < resume_idx:
+                print(f"\n[RESUME SKIP] Configuration {config_name} "
+                      f"(before resume config {args.resume_config})")
+                continue
+
         print(f"\n{'='*60}")
         print(f"CONFIGURATION: {config_name} (max_nodes={max_nodes})")
         print(f"{'='*60}")
@@ -510,6 +652,11 @@ def main():
                   f"for config {config_name} (need {max_nodes})")
             continue
 
+        # Determine per-config resume parameters
+        is_resume_config = (args.resume_config == config_name)
+        cfg_resume_num_nodes = args.resume_num_nodes if is_resume_config else None
+        cfg_resume_iteration = args.resume_iteration if is_resume_config else None
+
         # Process groups of GROUP_SIZE
         for group_end in range(GROUP_SIZE, max_nodes + 1, GROUP_SIZE):
             group_start = group_end - GROUP_SIZE + 1
@@ -517,14 +664,43 @@ def main():
             if group_start < 2:
                 group_start = 2
 
+            # ── Group-level resume skip ──────────────────────────────────
+            # Skip entire groups that end before the resume num_nodes.
+            # The grid search file-based checkpointing handles the rest.
+            if cfg_resume_num_nodes is not None and group_end < cfg_resume_num_nodes:
+                print(f"\n[RESUME SKIP] Group [{group_start}..{group_end}] "
+                      f"(before resume num_nodes={cfg_resume_num_nodes})")
+                continue
+
             print(f"\n--- Group: num_nodes = [{group_start}..{group_end}] ---")
 
-            # Phase 1: Grid search at boundary
-            best_lr, best_bs = grid_search(config_name, group_end, available_hospitals)
+            if args.learning_rate is not None and args.batch_size is not None and cfg_resume_num_nodes is not None:
+                print(f"  [RESUME] Using provided hyperparameters for grid search: "
+                      f"LR={args.learning_rate} BS={args.batch_size}")
+                best_lr, best_bs = args.learning_rate, args.batch_size
+                args.learning_rate = None
+                args.batch_size = None
+            else:
+                # Phase 1: Grid search at boundary
+                best_lr, best_bs = grid_search(config_name, group_end, available_hospitals)
 
             # Phase 2: Run swarm for all nodes in this group
             nodes_range = range(group_start, group_end + 1)
-            run_swarm_group(config_name, nodes_range, best_lr, best_bs, available_hospitals)
+            # Pass resume params only to the first eligible group
+            group_resume_nodes = (
+                cfg_resume_num_nodes
+                if cfg_resume_num_nodes is not None and group_start <= cfg_resume_num_nodes <= group_end
+                else None
+            )
+            group_resume_iter = cfg_resume_iteration if group_resume_nodes is not None else None
+            run_swarm_group(
+                config_name, nodes_range, best_lr, best_bs, available_hospitals,
+                resume_num_nodes=group_resume_nodes,
+                resume_iteration=group_resume_iter,
+            )
+            # Resume params are consumed after the first applicable group
+            cfg_resume_num_nodes = None
+            cfg_resume_iteration = None
 
     print(f"\n{'#'*60}")
     print(f"ALL EXPERIMENTS COMPLETED - {datetime.now()}")
