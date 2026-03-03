@@ -66,16 +66,13 @@ GRID_SEARCH_ITERS = 3        # random iterations used in grid search
 GROUP_SIZE = 5                # re-tune hyperparameters every N nodes
 
 BATCH_SIZES = [16, 32, 64, 128, 256, 512]
-LRS = [0.0001, 0.001, 0.01, 0.1]
+LRS = [0.001, 0.01, 0.1]
 
 CONFIGS = {
-    "5nodes":  5,
-    "10nodes": 10,
-    "20nodes": 20,
-    "40nodes": 40,
+    "80nodes": 80,
 }
 
-DATASETS = ["mimic_iv_fixed"]
+DATASETS = ["mimic_iii", "mimic_iv", "mimic_iv_fixed"]
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
