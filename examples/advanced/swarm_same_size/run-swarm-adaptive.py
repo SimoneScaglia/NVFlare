@@ -65,6 +65,9 @@ NUM_ITERATIONS = 10           # total iterations per configuration (0-9)
 GRID_SEARCH_ITERS = 3        # random iterations used in grid search
 GROUP_SIZE = 5                # re-tune hyperparameters every N nodes
 
+COMPUTE_FROM_NODE = 40
+COMPUTE_TO_NODE = 80
+
 BATCH_SIZES = [16, 32, 64, 128, 256, 512]
 LRS = [0.001, 0.01, 0.1]
 
@@ -475,20 +478,28 @@ def main():
                 print(f"ERROR: Config directory not found: {config_dir}")
                 continue
 
-            # Process groups of GROUP_SIZE
+            # Process groups of GROUP_SIZE, limited to [COMPUTE_FROM_NODE, COMPUTE_TO_NODE]
             for group_end in range(GROUP_SIZE, max_nodes + 1, GROUP_SIZE):
                 group_start = group_end - GROUP_SIZE + 1
                 # First group starts at 2 (no point running swarm with 1 node)
                 if group_start < 2:
                     group_start = 2
 
-                print(f"\n--- Group: num_nodes = [{group_start}..{group_end}] ---")
+                # Skip groups entirely outside the compute range
+                if group_end < COMPUTE_FROM_NODE or group_start > COMPUTE_TO_NODE:
+                    continue
+
+                # Clip the node range to the compute range
+                actual_start = max(group_start, COMPUTE_FROM_NODE)
+                actual_end = min(group_end, COMPUTE_TO_NODE)
+
+                print(f"\n--- Group: num_nodes = [{actual_start}..{actual_end}] ---")
 
                 # Phase 1: Grid search at boundary
                 best_lr, best_bs = grid_search(dataset, config_name, group_end)
 
-                # Phase 2: Run swarm for all nodes in this group
-                nodes_range = range(group_start, group_end + 1)
+                # Phase 2: Run swarm for nodes in this group within compute range
+                nodes_range = range(actual_start, actual_end + 1)
                 run_swarm_group(dataset, config_name, nodes_range, best_lr, best_bs)
 
     print(f"\n{'#'*60}")
