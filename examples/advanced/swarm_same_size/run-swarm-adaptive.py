@@ -65,7 +65,7 @@ NUM_ITERATIONS = 10           # total iterations per configuration (0-9)
 GRID_SEARCH_ITERS = 3        # random iterations used in grid search
 GROUP_SIZE = 5                # re-tune hyperparameters every N nodes
 
-COMPUTE_FROM_NODE = 40
+COMPUTE_FROM_NODE = 46
 COMPUTE_TO_NODE = 80
 
 BATCH_SIZES = [16, 32, 64, 128, 256, 512]
@@ -437,6 +437,12 @@ def main():
         default='all',
         help="Configuration to process (default: all)"
     )
+    parser.add_argument(
+        '--node-groups',
+        nargs='+',
+        type=int,
+        help="Specific node group boundaries to process (e.g., 45 50 55)"
+    )
     args = parser.parse_args()
 
     datasets = DATASETS if args.dataset == 'both' else [args.dataset]
@@ -480,6 +486,10 @@ def main():
 
             # Process groups of GROUP_SIZE, limited to [COMPUTE_FROM_NODE, COMPUTE_TO_NODE]
             for group_end in range(GROUP_SIZE, max_nodes + 1, GROUP_SIZE):
+                # Skip if specific node groups are requested and this is not one of them
+                if args.node_groups and group_end not in args.node_groups:
+                    continue
+
                 group_start = group_end - GROUP_SIZE + 1
                 # First group starts at 2 (no point running swarm with 1 node)
                 if group_start < 2:
