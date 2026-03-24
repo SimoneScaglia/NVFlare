@@ -89,6 +89,10 @@ RESULTS_DIR = SCRIPT_DIR / "results"
 OUTPUT_DIR = SCRIPT_DIR / "plots_results"
 
 GROUP_SIZE = 5
+MOSAIC_TITLE_FONTSIZE = 10
+MOSAIC_TABLE_ROW_HEIGHT = 1.15
+MOSAIC_TABLE_BORDER_WIDTH = 1.0
+MOSAIC_TABLE_DIVIDER_WIDTH = 1.4
 
 
 # ── Helpers ────────────────────────────────────────────────────────────
@@ -175,6 +179,163 @@ def _get_params_from_results(df, config_name, num_nodes):
         return None
     row = sub.iloc[0]
     return row["lr"], int(row["batch_size"])
+
+
+def _mosaic_group_intervals(max_nodes: int):
+    """Build intervals: 2-5, 6-10, 11-15, ... up to max_nodes."""
+    if max_nodes < 2:
+        return []
+
+    intervals = [(2, min(5, max_nodes))]
+    start = 6
+    while start < max_nodes:
+        end = min(start + GROUP_SIZE - 1, max_nodes)
+        intervals.append((start, end))
+        start += GROUP_SIZE
+    return intervals
+
+
+def _mosaic_group_spans(max_nodes: int):
+    """Build full-width table spans matching node intervals.
+
+    Spans cover the whole axis width [1.5, max_nodes+0.5] while labels remain
+    2-5, 5-10, 10-15, ... for readability.
+    """
+    intervals = _mosaic_group_intervals(max_nodes)
+    if not intervals:
+        return []
+
+    spans = []
+    for idx, (left_label, right_label) in enumerate(intervals):
+        span_left = 1.5 if idx == 0 else float(left_label) - 0.5
+        span_right = max_nodes + 0.5 if right_label == max_nodes else float(right_label) + 0.5
+        spans.append((span_left, span_right, left_label, right_label))
+    return spans
+
+
+def _get_params_for_interval(df: pd.DataFrame, config_name: str, start_node: int, end_node: int):
+    """Pick the first available (lr, bs) in a node interval for one configuration."""
+    for nn in range(start_node, end_node + 1):
+        params = _get_params_from_results(df, config_name, nn)
+        if params is not None:
+            return params
+    return None
+
+
+def _pair_runs_for_spans(df: pd.DataFrame, config_name: str, spans):
+    """Build contiguous runs of spans with identical (lr, bs) pair."""
+    if not spans:
+        return []
+
+    runs = []
+    current = None
+
+    for span_left, span_right, left_label, right_label in spans:
+        params = _get_params_for_interval(df, config_name, left_label, right_label)
+        if params is None:
+            pair = ("-", "-")
+        else:
+            lr, bs = params
+            pair = (f"{lr:g}", str(bs))
+
+        if current is None:
+            current = {
+                "left": span_left,
+                "right": span_right,
+                "lr": pair[0],
+                "bs": pair[1],
+            }
+            continue
+
+        if pair == (current["lr"], current["bs"]):
+            current["right"] = span_right
+        else:
+            runs.append(current)
+            current = {
+                "left": span_left,
+                "right": span_right,
+                "lr": pair[0],
+                "bs": pair[1],
+            }
+
+    if current is not None:
+        runs.append(current)
+
+    return runs
+
+
+def _draw_mosaic_hyperparam_table(table_ax, max_nodes, config_name, local_df, central_df, swarm_df):
+    """Draw 6-row hyperparameter table under a mosaic subplot."""
+    spans = _mosaic_group_spans(max_nodes)
+    if not spans:
+        table_ax.axis("off")
+        return
+
+    total_rows = 6
+    row_h = MOSAIC_TABLE_ROW_HEIGHT
+    table_height = total_rows * row_h
+
+    table_ax.set_xlim(1.5, max_nodes + 0.5)
+    table_ax.set_ylim(table_height, 0)
+    table_ax.set_xticks([])
+    table_ax.set_yticks([])
+    for spine in table_ax.spines.values():
+        spine.set_visible(False)
+
+    row_pairs = [
+        ("SW", swarm_df, 0),
+        ("CE", central_df, 2),
+        ("LO", local_df, 4),
+    ]
+
+    for _, df, start_row_idx in row_pairs:
+        runs = _pair_runs_for_spans(df, config_name, spans)
+        for run in runs:
+
+            for row_offset, value in enumerate([run["lr"], run["bs"]]):
+                row_idx = start_row_idx + row_offset
+                table_ax.add_patch(
+                    plt.Rectangle(
+                        (run["left"], row_idx * row_h),
+                        run["right"] - run["left"],
+                        row_h,
+                        fill=False,
+                        edgecolor="#b8b8b8",
+                        linewidth=MOSAIC_TABLE_BORDER_WIDTH,
+                    )
+                )
+                table_ax.text(
+                    (run["left"] + run["right"]) / 2,
+                    row_idx * row_h + (row_h / 2),
+                    value,
+                    ha="center",
+                    va="center",
+                    fontsize=MOSAIC_TITLE_FONTSIZE,
+                    fontweight="normal",
+                )
+
+    # Emphasize separators between Swarm/Central and Central/Local blocks.
+    table_ax.axhline(2 * row_h, color="#7f7f7f", linewidth=MOSAIC_TABLE_DIVIDER_WIDTH)
+    table_ax.axhline(4 * row_h, color="#7f7f7f", linewidth=MOSAIC_TABLE_DIVIDER_WIDTH)
+
+    table_ax.axvline(1.5, color="#b8b8b8", linewidth=MOSAIC_TABLE_DIVIDER_WIDTH)
+    table_ax.axvline(max_nodes + 0.5, color="#b8b8b8", linewidth=MOSAIC_TABLE_DIVIDER_WIDTH)
+
+    trans = table_ax.get_yaxis_transform()
+    labels = ["SW LR", "SW BS", "CE LR", "CE BS", "LO LR", "LO BS"]
+    for row_idx, label in enumerate(labels):
+        table_ax.text(
+            -0.02,
+            row_idx * row_h + (row_h / 2),
+            label,
+            transform=trans,
+            ha="right",
+            va="center",
+            fontsize=MOSAIC_TITLE_FONTSIZE,
+            fontweight="bold",
+        )
+
+        # Removed interval labels from table cells
 
 
 def _annotate_hyperparams(ax, dataset, config_name, max_nodes, local_df, central_df, swarm_df):
@@ -281,9 +442,9 @@ def plot_metric_mosaic(metric, ylabel, output_filename, dataset, ylim=None):
     dataset_name = DATASET_NAMES.get(dataset, dataset.upper())
     n = len(cfgs)
 
-    fig = plt.figure(figsize=(16, 6.5))
+    fig = plt.figure(figsize=(16, 8.2))
     # Reserve space at the top for the shared legend and title
-    gs = gridspec.GridSpec(2, 6, hspace=0.30, wspace=0.45, top=0.86, bottom=0.09, left=0.06, right=0.98)
+    gs = gridspec.GridSpec(2, 6, hspace=0.14, wspace=0.45, top=0.86, bottom=0.06, left=0.08, right=0.98)
     fig.suptitle(f"{dataset_name} - {ylabel}", fontsize=14, fontweight="bold", y=0.96)
 
     if n >= 5:
@@ -317,7 +478,9 @@ def plot_metric_mosaic(metric, ylabel, output_filename, dataset, ylim=None):
     for idx, cfg in enumerate(cfgs):
         if idx >= len(positions):
             break
-        ax = fig.add_subplot(positions[idx])
+        panel_spec = positions[idx].subgridspec(2, 1, height_ratios=[3.8, 2.6], hspace=0.34)
+        ax = fig.add_subplot(panel_spec[0])
+        table_ax = fig.add_subplot(panel_spec[1])
         if first_ax is None:
             first_ax = ax
         config_name = cfg["name"]
@@ -336,7 +499,7 @@ def plot_metric_mosaic(metric, ylabel, output_filename, dataset, ylim=None):
         ax.tick_params(axis="y", labelsize=7)
         ax.set_xlabel("Num nodes", fontsize=9)
         ax.set_ylabel(ylabel, fontsize=9, labelpad=2)
-        ax.set_title(cfg["label"], fontsize=10, fontweight="bold", pad=4)
+        ax.set_title(cfg["label"], fontsize=MOSAIC_TITLE_FONTSIZE, fontweight="bold", pad=4)
         if ylim:
             ax.set_ylim(ylim)
             ymin, ymax = ylim
@@ -349,6 +512,8 @@ def plot_metric_mosaic(metric, ylabel, output_filename, dataset, ylim=None):
                 ystep = 0.05
             ax.set_yticks(np.arange(ymin, ymax + ystep / 2, ystep))
         ax.grid(True, alpha=0.3)
+
+        _draw_mosaic_hyperparam_table(table_ax, max_nodes, config_name, local_df, central_df, swarm_df)
 
     # Shared horizontal legend at the top of the figure
     if first_ax is not None:
