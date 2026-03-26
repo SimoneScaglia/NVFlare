@@ -20,41 +20,51 @@ def run_command(command, shell=True):
         print(f"STDERR: {result.stderr}")
     return result
 
-def edit_config_file(config_path, min_responses_required, learning_rate, batch_size):
-    """Edit the config file with values from JSON."""
-    print(f"\nEditing config file: {config_path}")
-    
+def edit_config_files(client_config_path, server_config_path, min_responses_required, learning_rate, batch_size, aggregation_epochs, num_rounds):
+    """Edit client/server job templates with values from JSON."""
+    print(f"\nEditing client config file: {client_config_path}")
+
     try:
-        with open(config_path, 'r') as f:
-            content = f.read()
-        
-        # Update min_responses_required
-        pattern_min_responses = r'min_responses_required\s*=\s*\d+'
-        replacement_min_responses = f'min_responses_required = {min_responses_required}'
-        content = re.sub(pattern_min_responses, replacement_min_responses, content)
-        
-        # Find the mimic-learner component and update lr and batch_size within its args
-        # First, let's find the mimic-learner section and update both lr and batch_size
+        with open(client_config_path, 'r') as f:
+            client_content = f.read()
+
+        # Update min_responses_required.
+        client_content = re.sub(
+            r'min_responses_required\s*=\s*\d+',
+            f'min_responses_required = {min_responses_required}',
+            client_content,
+        )
+
+        # Update learner args: lr, batch_size, aggregation_epochs.
         learner_pattern = r'(id = "mimic-learner"[^{]*args \{)([^}]+)(\})'
-        
+
         def update_learner_args(match):
             args_section = match.group(2)
-            # Update lr
+            args_section = re.sub(r'aggregation_epochs\s*=\s*\d+', f'aggregation_epochs = {aggregation_epochs}', args_section)
             args_section = re.sub(r'lr\s*=\s*\d+\.?\d*', f'lr = {learning_rate}', args_section)
-            # Update batch_size
             args_section = re.sub(r'batch_size\s*=\s*\d+', f'batch_size = {batch_size}', args_section)
             return match.group(1) + args_section + match.group(3)
-        
-        content = re.sub(learner_pattern, update_learner_args, content, flags=re.DOTALL)
-        
-        # Write back the modified content
-        with open(config_path, 'w') as f:
-            f.write(content)
-        
-        print("Config file updated successfully")
-        
+
+        client_content = re.sub(learner_pattern, update_learner_args, client_content, flags=re.DOTALL)
+
+        with open(client_config_path, 'w') as f:
+            f.write(client_content)
+
+        print("Client config updated successfully")
+
+        print(f"Editing server config file: {server_config_path}")
+        with open(server_config_path, 'r') as f:
+            server_content = f.read()
+
+        server_content = re.sub(r'num_rounds\s*=\s*\d+', f'num_rounds = {num_rounds}', server_content)
+
+        with open(server_config_path, 'w') as f:
+            f.write(server_content)
+
+        print("Server config updated successfully")
+
     except Exception as e:
-        print(f"Error editing config file: {e}")
+        print(f"Error editing config files: {e}")
         sys.exit(1)
 
 def copy_data_files(data_dir, iteration):
@@ -106,16 +116,27 @@ def main():
     print("\nActivating virtual environment...")
     run_command("source swarm_env/bin/activate", shell=True)
     
-    # Edit config file
-    config_file_path = "../../../job_templates/swarm_cse_tf_model_learner/config_fed_client.conf"
+    # Edit config files
+    client_config_file_path = "../../../job_templates/swarm_cse_tf_model_learner/config_fed_client.conf"
+    server_config_file_path = "../../../job_templates/swarm_cse_tf_model_learner/config_fed_server.conf"
     
     # Get values from JSON
     min_responses_for_aggregation = config.get("min_responses_for_aggregation", 0)
     learning_rate = config.get("hyperparameters", {}).get("learning_rate", 0)
     batch_size = config.get("hyperparameters", {}).get("batch_size", 0)
+    aggregation_per_epoch = config.get("aggregation_per_epoch", 5)
+    num_aggregation_rounds = config.get("num_aggregation_rounds", 1)
     
-    # Edit the config file
-    edit_config_file(config_file_path, min_responses_for_aggregation, learning_rate, batch_size)
+    # Edit the config files
+    edit_config_files(
+        client_config_path=client_config_file_path,
+        server_config_path=server_config_file_path,
+        min_responses_required=min_responses_for_aggregation,
+        learning_rate=learning_rate,
+        batch_size=batch_size,
+        aggregation_epochs=aggregation_per_epoch,
+        num_rounds=num_aggregation_rounds,
+    )
     
     # Copy data files
     data_directory = config.get("data_directory", "")

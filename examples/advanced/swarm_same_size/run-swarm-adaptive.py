@@ -61,11 +61,11 @@ import tensorflow as tf
 # ── Constants ──────────────────────────────────────────────────────────────────
 SEED = 42
 EPOCHS = 25
-NUM_ITERATIONS = 10           # total iterations per configuration (0-9)
+NUM_ITERATIONS = 5           # total iterations per configuration (0-9)
 GRID_SEARCH_ITERS = 3        # random iterations used in grid search
 GROUP_SIZE = 5                # re-tune hyperparameters every N nodes
 
-COMPUTE_FROM_NODE = 46
+COMPUTE_FROM_NODE = 2
 COMPUTE_TO_NODE = 80
 
 BATCH_SIZES = [16, 32, 64, 128, 256, 512]

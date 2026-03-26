@@ -173,7 +173,7 @@ def main():
     global NODES, DATA_DIR, TEST_FILE, EPOCHS, BATCH_SIZE, LEARNING_RATE
     NODES = config["num_nodes"]
     DATA_DIR = Path(config["data_directory"])
-    EPOCHS = 25
+    EPOCHS = int(config.get("num_aggregation_rounds", 5) * config.get("aggregation_per_epoch", 5))
     BATCH_SIZE = config["hyperparameters"]["batch_size"]
     LEARNING_RATE = config["hyperparameters"]["learning_rate"]
 

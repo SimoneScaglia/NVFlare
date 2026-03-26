@@ -9,6 +9,7 @@ from datetime import datetime
 import random
 import tensorflow as tf
 import time
+import gc
 
 # Set seeds for reproducibility
 random.seed(42)
@@ -43,8 +44,6 @@ def validate_global_models(
         weights: List of weights for each client
         results_dir: Directory to save results
     """
-    # Hospital IDs for each site
-    hospital_ids = [1, 2, 3, 4, 5]
 
     # Reverse weights if needed (as in original code)
     weights = weights[::-1]
@@ -98,8 +97,7 @@ def validate_global_models(
 
                 # Load test data for client j if not cached
                 if j not in cached_data:
-                    hospital_id = hospital_ids[j - 1]
-                    data_path = data_path_template.format(hospitalid=hospital_id)
+                    data_path = data_path_template
                     try:
                         data = pd.read_csv(data_path)
                         X_test = data.iloc[:, :-1].values
@@ -167,6 +165,10 @@ def validate_global_models(
                     print(f"Error evaluating model at {model_path}: {str(e)}")
                     import traceback
                     traceback.print_exc()
+                finally:
+                    tf.keras.backend.clear_session()
+                    del model
+                    gc.collect()
 
         if processed_in_cycle == 0:
             print(f"No new models found. Sleeping {poll_interval_sec}s...")
@@ -237,7 +239,7 @@ def main():
     base_path = os.path.join("/home/swarm-learning/repos/NVFlare/examples/advanced/swarm_eicu/")
 
     # Template for test file paths
-    test_file_template = os.path.join(base_path, data_directory, "{hospitalid}_test.csv")
+    test_file_template = os.path.join(base_path, data_directory, "test.csv")
 
     # Results directory: base_path + results_directory
     final_results_dir = os.path.join(base_path, results_directory)

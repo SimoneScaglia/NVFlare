@@ -40,7 +40,7 @@ def validate_global_models(data_path_template, models_path, iteration, num_clien
 
     # Create results directory if it doesn't exist
     os.makedirs(results_dir, exist_ok=True)
-    results_file = os.path.join(results_dir, 'swarm_results.csv')
+    results_file = os.path.join(results_dir, 'swarm_results_entire_testset.csv')
 
     # Load existing results or create new dataframe
     if os.path.exists(results_file):
@@ -63,7 +63,8 @@ def validate_global_models(data_path_template, models_path, iteration, num_clien
     for j in range(1, num_clients + 1):
         # Construct test file path for the current hospital ID
         hospital_id = hospital_ids[j - 1]
-        data_path = data_path_template.format(hospitalid=hospital_id)
+        #data_path = data_path_template.format(hospitalid=hospital_id)
+        data_path = data_path_template
 
         # Load test data
         try:
@@ -192,7 +193,8 @@ def main():
     base_path = os.path.join("/home/swarm-learning/repos/NVFlare/examples/advanced/swarm_eicu/")
 
     # Template for test file paths
-    test_file_template = os.path.join(base_path, data_directory, "{hospitalid}_test.csv")
+    #test_file_template = os.path.join(base_path, data_directory, "{hospitalid}_test.csv")
+    test_file_template = os.path.join(base_path, data_directory, "test.csv")
 
     # Results directory: base_path + results_directory
     final_results_dir = os.path.join(base_path, results_directory)
