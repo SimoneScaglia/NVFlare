@@ -6,6 +6,12 @@ import subprocess
 from datetime import datetime
 import re
 import pandas as pd
+import numpy as np
+import tensorflow as tf
+import time
+
+sys.path.append(os.path.join(os.path.dirname(__file__), "../mimic/networks"))
+from mimic_nets import FCN, get_metrics
 
 def run_command(command, shell=True):
     """Execute a shell command and return the result."""
@@ -20,7 +26,15 @@ def run_command(command, shell=True):
         print(f"STDERR: {result.stderr}")
     return result
 
-def edit_config_files(client_config_path, server_config_path, min_responses_required, learning_rate, batch_size, aggregation_epochs, num_rounds):
+def edit_config_files(
+    client_config_path,
+    server_config_path,
+    min_responses_required,
+    learning_rate,
+    batch_size,
+    aggregation_epochs,
+    num_rounds,
+):
     """Edit client/server job templates with values from JSON."""
     print(f"\nEditing client config file: {client_config_path}")
 
@@ -35,7 +49,14 @@ def edit_config_files(client_config_path, server_config_path, min_responses_requ
             client_content,
         )
 
-        # Update learner args: lr, batch_size, aggregation_epochs.
+        # Use the learner variant that saves round checkpoints.
+        # Replace only the learner component path, not any executor path.
+        client_content = client_content.replace(
+            'path = "mimic.learners.mimic_model_learner.MimicModelLearner"',
+            'path = "mimic.learners.mimic_model_learner_save_weights_aggr_round.MimicModelLearner"',
+        )
+
+        # Update learner args: aggregation_epochs, lr, batch_size.
         learner_pattern = r'(id = "mimic-learner"[^{]*args \{)([^}]+)(\})'
 
         def update_learner_args(match):
@@ -85,6 +106,139 @@ def copy_data_files(data_dir, iteration):
 
         dest_file = os.path.join(dest_dir, f"site-{i + 1}.csv")
         df.to_csv(dest_file, index=False)
+
+
+def append_swarm_result(path, row):
+    columns = [
+        "datetime",
+        "user",
+        "splits",
+        "loss",
+        "auc",
+        "auprc",
+        "accuracy",
+        "precision",
+        "recall",
+        "iteration",
+        "epoch",
+    ]
+    row_df = pd.DataFrame([{k: row.get(k, None) for k in columns}], columns=columns)
+    if os.path.exists(path):
+        row_df.to_csv(path, mode="a", header=False, index=False)
+    else:
+        row_df.to_csv(path, mode="w", header=True, index=False)
+
+
+def evaluate_round_checkpoints_live(config, script_dir, simulator_proc, poll_interval_sec=5):
+    num_clients = int(config.get("num_nodes", 0))
+    learning_rate = config.get("hyperparameters", {}).get("learning_rate", 0.0)
+    num_rounds = int(config.get("num_aggregation_rounds", 0))
+    aggregation_per_epoch = int(config.get("aggregation_per_epoch", 5))
+    iteration = int(config.get("iteration", 0))
+
+    node_weights = config.get("node_weights", {})
+    # Keep the historical weight ordering used by previous validation scripts.
+    weights = [node_weights.get(str(i), (100.0 / num_clients if num_clients else 0.0)) for i in range(1, num_clients + 1)][::-1]
+
+    swarm_eicu_dir = os.path.abspath(os.path.join(script_dir, "../swarm_eicu"))
+    test_csv = os.path.join(swarm_eicu_dir, config.get("data_directory", ""), "test.csv")
+    results_dir = os.path.join(swarm_eicu_dir, config.get("results_directory", ""))
+    os.makedirs(results_dir, exist_ok=True)
+    results_file = os.path.join(results_dir, "swarm_results_entire_testset.csv")
+
+    if not os.path.exists(test_csv):
+        raise FileNotFoundError(f"Test CSV not found: {test_csv}")
+
+    data = pd.read_csv(test_csv)
+    x_test = data.iloc[:, :-1].astype(np.float32).values
+    y_test = data.iloc[:, -1].astype(np.float32).values
+    input_dim = x_test.shape[1]
+
+    weights_dir = "/tmp/nvflare/results/weights"
+    metrics_dir = "/tmp/nvflare/results/metrics"
+    print(f"\nStreaming evaluation from: {weights_dir}")
+
+    expected = {(round_idx, client_idx) for round_idx in range(1, num_rounds + 1) for client_idx in range(1, num_clients + 1)}
+    processed = set()
+
+    while len(processed) < len(expected):
+        progressed = False
+        for round_idx in range(1, num_rounds + 1):
+            epoch_marker = round_idx * aggregation_per_epoch
+            for client_idx in range(1, num_clients + 1):
+                key = (round_idx, client_idx)
+                if key in processed:
+                    continue
+
+                model_path = os.path.join(weights_dir, f"nodesite-{client_idx}_round{round_idx}.weights.h5")
+                if not os.path.exists(model_path):
+                    continue
+
+                model = FCN(input_dim=input_dim)
+                model.build((None, input_dim))
+                model.load_weights(model_path)
+                model.compile(
+                    optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
+                    loss="binary_crossentropy",
+                    metrics=get_metrics(),
+                )
+                metrics = model.evaluate(x_test, y_test, verbose=0, return_dict=True)
+
+                row = {
+                    "datetime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "user": client_idx,
+                    "splits": weights[client_idx - 1] if len(weights) >= client_idx else 100.0 / num_clients,
+                    "loss": metrics["loss"],
+                    "auc": metrics["auc"],
+                    "auprc": metrics.get("auprc", np.nan),
+                    "accuracy": metrics["accuracy"],
+                    "precision": metrics["precision"],
+                    "recall": metrics["recall"],
+                    "iteration": iteration,
+                    "epoch": epoch_marker,
+                }
+                append_swarm_result(results_file, row)
+                processed.add(key)
+                progressed = True
+
+                print(
+                    f"  validated round {round_idx}/{num_rounds}, client {client_idx}: "
+                    f"AUC={metrics['auc']:.4f}, Loss={metrics['loss']:.4f}, epoch={epoch_marker}"
+                )
+
+                # Remove artifacts immediately to keep disk usage bounded.
+                try:
+                    os.remove(model_path)
+                except OSError:
+                    pass
+                metric_path = os.path.join(metrics_dir, f"metrics_nodesite-{client_idx}_round{round_idx}.json")
+                if os.path.exists(metric_path):
+                    try:
+                        os.remove(metric_path)
+                    except OSError:
+                        pass
+
+                tf.keras.backend.clear_session()
+
+        if len(processed) == len(expected):
+            break
+
+        if simulator_proc.poll() is not None and not progressed:
+            missing = sorted(expected - processed)
+            sample = ", ".join([f"r{r}-c{c}" for r, c in missing[:10]])
+            raise RuntimeError(
+                f"Simulator finished but {len(missing)} checkpoints are missing. Sample missing: {sample}"
+            )
+
+        if not progressed:
+            time.sleep(poll_interval_sec)
+
+    # Ensure simulator completed successfully.
+    simulator_rc = simulator_proc.wait()
+    if simulator_rc != 0:
+        raise RuntimeError(f"nvflare simulator exited with code {simulator_rc}")
+
+    print(f"\nSaved per-round swarm metrics to: {results_file}")
 
 def main():
     # Check if JSON file path is provided
@@ -155,30 +309,30 @@ def main():
     num_clients = num_nodes
     job_name = f"mimic_swarm_{num_clients}"
     print(f"\nCreating nvflare job: {job_name}")
+
+    # Clean old checkpoint artifacts to avoid mixing runs.
+    run_command("rm -rf /tmp/nvflare/results/weights /tmp/nvflare/results/metrics")
     
     create_job_cmd = f"nvflare job create -j ./jobs/{job_name} -w swarm_cse_tf_model_learner -sd ./code -force"
-    run_command(create_job_cmd)
+    create_result = run_command(create_job_cmd)
+    if create_result.returncode != 0:
+        sys.exit(create_result.returncode)
     
     # Run nvflare simulator
     print(f"\nRunning nvflare simulator with {num_clients} clients")
-    simulator_cmd = f"nvflare simulator ./jobs/{job_name} -w /tmp/nvflare/{job_name} -n {num_clients} -t {num_clients}"
-    run_command(simulator_cmd)
-    
-    # Run validation script
-    print(f"\nRunning validation script...")
+    simulator_cmd = f"source swarm_env/bin/activate && nvflare simulator ./jobs/{job_name} -w /tmp/nvflare/{job_name} -n {num_clients} -t {num_clients}"
+    simulator_proc = subprocess.Popen(
+        simulator_cmd,
+        shell=True,
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+        executable="/bin/bash",
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    # Evaluate and save one row per client every 5 epochs while simulator is still running.
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    val_script = os.path.join(script_dir, "../mimic/utils/val_glob_model_eicu.py")
-    
-    json_path = f"../swarm_eicu/{json_path}"
-    if os.path.exists(val_script):
-        run_command(f"python3 \"{val_script}\" \"{json_path}\"")
-    else:
-        # Try alternative path
-        val_script = os.path.join(os.path.dirname(script_dir), "mimic/utils/val_glob_model_eicu.py")
-        if os.path.exists(val_script):
-            run_command(f"python3 \"{val_script}\" \"{json_path}\"")
-        else:
-            print(f"Warning: Validation script not found at {val_script}")
+    evaluate_round_checkpoints_live(config=config, script_dir=script_dir, simulator_proc=simulator_proc)
     
     # Clean up temporary directory
     print(f"\nCleaning up temporary directory...")

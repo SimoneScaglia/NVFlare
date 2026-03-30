@@ -9,10 +9,24 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Generate experiment configs for swarm_eicu experiments.")
     parser.add_argument("--base-dir", type=str, default="configs_all_datasets_epochs", help="Output directory for JSON configs")
     parser.add_argument("--iterations", type=int, default=5, help="Number of iterations per configuration")
+    parser.add_argument("--total-epochs", type=int, default=150, help="Total epochs to run for each lr-bs pair")
+    parser.add_argument(
+        "--aggregation-per-epoch",
+        type=int,
+        default=5,
+        help="Local epochs per aggregation round (results are saved once per round)",
+    )
     return parser.parse_args()
 
 
-def create_config_files(base_dir, learning_rates, batch_sizes, epoch_values, iterations=5):
+def create_config_files(base_dir, learning_rates, batch_sizes, total_epochs, aggregation_per_epoch=5, iterations=5):
+    if total_epochs <= 0:
+        raise ValueError("total_epochs must be > 0")
+    if aggregation_per_epoch <= 0:
+        raise ValueError("aggregation_per_epoch must be > 0")
+    if total_epochs % aggregation_per_epoch != 0:
+        raise ValueError("total_epochs must be divisible by aggregation_per_epoch")
+
     base_config = {
         "experiment_name": "",
         "num_nodes": 5,
@@ -63,33 +77,29 @@ def create_config_files(base_dir, learning_rates, batch_sizes, epoch_values, ite
 
     created = 0
     for dataset_name, dataset_cfg in datasets.items():
-        for total_epochs in epoch_values:
-            aggregation_per_epoch = 5
-            num_rounds = total_epochs // aggregation_per_epoch
+        num_rounds = total_epochs // aggregation_per_epoch
 
-            for lr in learning_rates:
-                for bs in batch_sizes:
-                    for iteration in range(iterations):
-                        config = copy.deepcopy(base_config)
-                        config["experiment_name"] = f"{dataset_name}_{total_epochs}_{iteration}_lr{lr:.5f}_bs{bs}"
-                        config["num_aggregation_rounds"] = num_rounds
-                        config["aggregation_per_epoch"] = aggregation_per_epoch
-                        config["hyperparameters"]["learning_rate"] = lr
-                        config["hyperparameters"]["batch_size"] = bs
-                        config["data_directory"] = dataset_cfg["data_directory"]
-                        config["results_directory"] = (
-                            f"new_results/{dataset_cfg['results_subdir']}/{total_epochs}_{iteration}_lr{lr:.5f}_bs{bs}/"
-                        )
-                        config["iteration"] = iteration
+        for lr in learning_rates:
+            for bs in batch_sizes:
+                for iteration in range(iterations):
+                    config = copy.deepcopy(base_config)
+                    config["experiment_name"] = f"{dataset_name}_{total_epochs}_{iteration}_lr{lr:.5f}_bs{bs}"
+                    config["num_aggregation_rounds"] = num_rounds
+                    config["aggregation_per_epoch"] = aggregation_per_epoch
+                    config["hyperparameters"]["learning_rate"] = lr
+                    config["hyperparameters"]["batch_size"] = bs
+                    config["data_directory"] = dataset_cfg["data_directory"]
+                    config["results_directory"] = (
+                        f"new_results/{dataset_cfg['results_subdir']}/{total_epochs}_{iteration}_lr{lr:.5f}_bs{bs}/"
+                    )
+                    config["iteration"] = iteration
 
-                        file_name = (
-                            f"{dataset_name}_{total_epochs}_{iteration}_lr{lr:.5f}_bs{bs}.json".replace("0.", "0-")
-                        )
-                        file_path = os.path.join(base_dir, file_name)
+                    file_name = f"{dataset_name}_{total_epochs}_{iteration}_lr{lr:.5f}_bs{bs}.json".replace("0.", "0-")
+                    file_path = os.path.join(base_dir, file_name)
 
-                        with open(file_path, "w", encoding="utf-8") as f:
-                            json.dump(config, f, indent=4)
-                        created += 1
+                    with open(file_path, "w", encoding="utf-8") as f:
+                        json.dump(config, f, indent=4)
+                    created += 1
 
     print(f"Generated {created} config files in: {base_dir}")
 
@@ -99,12 +109,12 @@ if __name__ == "__main__":
 
     learning_rates = [0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1]
     batch_sizes = [8, 16, 32, 64, 128, 256, 512]
-    epoch_values = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50]
 
     create_config_files(
         base_dir=args.base_dir,
         learning_rates=learning_rates,
         batch_sizes=batch_sizes,
-        epoch_values=epoch_values,
+        total_epochs=args.total_epochs,
+        aggregation_per_epoch=args.aggregation_per_epoch,
         iterations=args.iterations,
     )

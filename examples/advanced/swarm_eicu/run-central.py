@@ -30,7 +30,7 @@ LEARNING_RATE = None
 # fixed output values
 OUTPUT_USER = "central"
 OUTPUT_SPLITS = 100
-OUTPUT_COLUMNS = ["datetime", "user", "splits", "loss", "auc", "auprc", "accuracy", "precision", "recall", "iteration"]
+OUTPUT_COLUMNS = ["datetime", "user", "splits", "loss", "auc", "auprc", "accuracy", "precision", "recall", "iteration", "epoch"]
 
 # ==========================
 # DEFINIZIONE MODELLO FCN
@@ -126,7 +126,7 @@ def load_and_concat_datasets(data_dir: Path, iteration: int, dataset_type: str) 
     concatenated_df = pd.concat(dfs, axis=0, ignore_index=True)
     return concatenated_df.sample(frac=1, random_state=iteration).reset_index(drop=True)
 
-def train_and_eval(x_nodes: int, iteration_y: int, epochs: int, batch_size: int, verbose=0):
+def train_and_eval(x_nodes: int, iteration_y: int, epochs: int, batch_size: int, out_file: Path, eval_every: int = 5, verbose=0):
     print(f"\n=== x_nodes={x_nodes}, iteration={iteration_y} ===")
 
     # Caricamento e concatenazione dei dataset
@@ -146,8 +146,39 @@ def train_and_eval(x_nodes: int, iteration_y: int, epochs: int, batch_size: int,
         metrics=get_metrics()
     )
 
-    model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size, verbose=verbose, shuffle=True)
-    eval_results = model.evaluate(X_test, y_test, batch_size=batch_size, verbose=0, return_dict=True)
+    checkpoints = list(range(eval_every, epochs + 1, eval_every))
+    if not checkpoints or checkpoints[-1] != epochs:
+        checkpoints.append(epochs)
+
+    prev_epoch = 0
+    eval_results = None
+    for target_epoch in checkpoints:
+        model.fit(
+            X_train,
+            y_train,
+            initial_epoch=prev_epoch,
+            epochs=target_epoch,
+            batch_size=batch_size,
+            verbose=verbose,
+            shuffle=True,
+        )
+
+        eval_results = model.evaluate(X_test, y_test, batch_size=batch_size, verbose=0, return_dict=True)
+        row = {
+            "datetime": current_datetime_rome_iso(),
+            "user": OUTPUT_USER,
+            "splits": OUTPUT_SPLITS,
+            "loss": eval_results["loss"],
+            "auc": eval_results["auc"],
+            "auprc": eval_results["auprc"],
+            "accuracy": eval_results["accuracy"],
+            "precision": eval_results["precision"],
+            "recall": eval_results["recall"],
+            "iteration": iteration_y,
+            "epoch": target_epoch,
+        }
+        append_result_csv(out_file, row)
+        prev_epoch = target_epoch
 
     tf.keras.backend.clear_session()
     del model
@@ -181,22 +212,15 @@ def main():
     ensure_dir(out_dir)
     out_file = out_dir / "central_results.csv"
 
-    results = train_and_eval(x_nodes=config["num_nodes"], iteration_y=config["iteration"], epochs=EPOCHS, batch_size=BATCH_SIZE)
-
-    row = {
-        "datetime": current_datetime_rome_iso(),
-        "user": OUTPUT_USER,
-        "splits": OUTPUT_SPLITS,
-        'loss': results['loss'],
-        'auc': results['auc'],
-        'auprc': results['auprc'],
-        'accuracy': results['accuracy'],
-        'precision': results['precision'],
-        'recall': results['recall'],
-        "iteration": config["iteration"]
-    }
-    append_result_csv(out_file, row)
-    print(f"Salvato risultato in {out_file}")
+    _ = train_and_eval(
+        x_nodes=config["num_nodes"],
+        iteration_y=config["iteration"],
+        epochs=EPOCHS,
+        batch_size=BATCH_SIZE,
+        out_file=out_file,
+        eval_every=5,
+    )
+    print(f"Salvati risultati ogni 5 epoche in {out_file}")
 
 
 if __name__ == "__main__":
