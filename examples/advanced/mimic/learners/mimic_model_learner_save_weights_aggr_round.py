@@ -8,7 +8,7 @@ from nvflare.app_common.abstract.fl_model import FLModel, ParamsType
 from nvflare.app_common.abstract.model_learner import ModelLearner
 from nvflare.app_common.utils.fl_model_utils import FLModelUtils
 from nvflare.app_opt.tf.fedprox_loss import TFFedProxLoss
-from mimic.networks.mimic_nets import FCN, get_opt, get_metrics
+from mimic.networks.mimic_nets import FCN, get_metrics
 from sklearn.model_selection import train_test_split
 from nvflare.app_common.app_constant import AppConstants, ModelName
 import random
@@ -84,7 +84,8 @@ class MimicModelLearner(ModelLearner):
         self.best_local_model_file = os.path.join(self.app_root, "best_local_model.weights.h5")
 
         self.model = FCN()
-        self.optimizer = get_opt()
+        # Use the experiment-configured local learning rate.
+        self.optimizer = tf.keras.optimizers.Adam(learning_rate=self.lr)
         self.criterion = tf.keras.losses.BinaryCrossentropy()
 
         if self.fedproxloss_mu > 0:

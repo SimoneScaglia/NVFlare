@@ -137,8 +137,13 @@ def evaluate_round_checkpoints_live(config, script_dir, simulator_proc, poll_int
     iteration = int(config.get("iteration", 0))
 
     node_weights = config.get("node_weights", {})
-    # Keep the historical weight ordering used by previous validation scripts.
-    weights = [node_weights.get(str(i), (100.0 / num_clients if num_clients else 0.0)) for i in range(1, num_clients + 1)][::-1]
+    client_weights = np.array(
+        [node_weights.get(str(i), (100.0 / num_clients if num_clients else 0.0)) for i in range(1, num_clients + 1)],
+        dtype=np.float64,
+    )
+    if client_weights.sum() <= 0:
+        client_weights = np.ones(num_clients, dtype=np.float64)
+    client_weights = client_weights / client_weights.sum()
 
     swarm_eicu_dir = os.path.abspath(os.path.join(script_dir, "../swarm_eicu"))
     test_csv = os.path.join(swarm_eicu_dir, config.get("data_directory", ""), "test.csv")
@@ -158,55 +163,76 @@ def evaluate_round_checkpoints_live(config, script_dir, simulator_proc, poll_int
     metrics_dir = "/tmp/nvflare/results/metrics"
     print(f"\nStreaming evaluation from: {weights_dir}")
 
-    expected = {(round_idx, client_idx) for round_idx in range(1, num_rounds + 1) for client_idx in range(1, num_clients + 1)}
-    processed = set()
+    expected_rounds = set(range(1, num_rounds + 1))
+    processed_rounds = set()
 
-    while len(processed) < len(expected):
+    while len(processed_rounds) < len(expected_rounds):
         progressed = False
         for round_idx in range(1, num_rounds + 1):
+            if round_idx in processed_rounds:
+                continue
+
             epoch_marker = round_idx * aggregation_per_epoch
-            for client_idx in range(1, num_clients + 1):
-                key = (round_idx, client_idx)
-                if key in processed:
-                    continue
+            model_paths = [os.path.join(weights_dir, f"nodesite-{client_idx}_round{round_idx}.weights.h5") for client_idx in range(1, num_clients + 1)]
+            if not all(os.path.exists(path) for path in model_paths):
+                continue
 
-                model_path = os.path.join(weights_dir, f"nodesite-{client_idx}_round{round_idx}.weights.h5")
-                if not os.path.exists(model_path):
-                    continue
-
+            local_weight_lists = []
+            for client_idx, model_path in enumerate(model_paths, start=1):
                 model = FCN(input_dim=input_dim)
                 model.build((None, input_dim))
-                model.load_weights(model_path)
-                model.compile(
-                    optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
-                    loss="binary_crossentropy",
-                    metrics=get_metrics(),
-                )
-                metrics = model.evaluate(x_test, y_test, verbose=0, return_dict=True)
+                loaded = False
+                while not loaded:
+                    try:
+                        model.load_weights(model_path)
+                        loaded = True
+                    except Exception as e:
+                        loaded = False
+                        print(f"Error loading weights from {model_path}: {e}")
+                        time.sleep(5)
+                local_weight_lists.append(model.get_weights())
+                tf.keras.backend.clear_session()
 
-                row = {
-                    "datetime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "user": client_idx,
-                    "splits": weights[client_idx - 1] if len(weights) >= client_idx else 100.0 / num_clients,
-                    "loss": metrics["loss"],
-                    "auc": metrics["auc"],
-                    "auprc": metrics.get("auprc", np.nan),
-                    "accuracy": metrics["accuracy"],
-                    "precision": metrics["precision"],
-                    "recall": metrics["recall"],
-                    "iteration": iteration,
-                    "epoch": epoch_marker,
-                }
-                append_swarm_result(results_file, row)
-                processed.add(key)
-                progressed = True
+            aggregated_weights = []
+            for layer_idx in range(len(local_weight_lists[0])):
+                layer_stack = np.stack([client_layers[layer_idx] for client_layers in local_weight_lists], axis=0)
+                layer_avg = np.tensordot(client_weights, layer_stack, axes=(0, 0))
+                aggregated_weights.append(layer_avg)
 
-                print(
-                    f"  validated round {round_idx}/{num_rounds}, client {client_idx}: "
-                    f"AUC={metrics['auc']:.4f}, Loss={metrics['loss']:.4f}, epoch={epoch_marker}"
-                )
+            global_model = FCN(input_dim=input_dim)
+            global_model.build((None, input_dim))
+            global_model.set_weights(aggregated_weights)
+            global_model.compile(
+                optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
+                loss="binary_crossentropy",
+                metrics=get_metrics(),
+            )
+            metrics = global_model.evaluate(x_test, y_test, verbose=0, return_dict=True)
 
-                # Remove artifacts immediately to keep disk usage bounded.
+            row = {
+                "datetime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "user": "swarm_global",
+                "splits": 100,
+                "loss": metrics["loss"],
+                "auc": metrics["auc"],
+                "auprc": metrics.get("auprc", np.nan),
+                "accuracy": metrics["accuracy"],
+                "precision": metrics["precision"],
+                "recall": metrics["recall"],
+                "iteration": iteration,
+                "epoch": epoch_marker,
+            }
+            append_swarm_result(results_file, row)
+            processed_rounds.add(round_idx)
+            progressed = True
+
+            print(
+                f"  validated aggregated global round {round_idx}/{num_rounds}: "
+                f"AUC={metrics['auc']:.4f}, Loss={metrics['loss']:.4f}, epoch={epoch_marker}"
+            )
+
+            # Remove round artifacts immediately to keep disk usage bounded.
+            for client_idx, model_path in enumerate(model_paths, start=1):
                 try:
                     os.remove(model_path)
                 except OSError:
@@ -218,16 +244,16 @@ def evaluate_round_checkpoints_live(config, script_dir, simulator_proc, poll_int
                     except OSError:
                         pass
 
-                tf.keras.backend.clear_session()
+            tf.keras.backend.clear_session()
 
-        if len(processed) == len(expected):
+        if len(processed_rounds) == len(expected_rounds):
             break
 
         if simulator_proc.poll() is not None and not progressed:
-            missing = sorted(expected - processed)
-            sample = ", ".join([f"r{r}-c{c}" for r, c in missing[:10]])
+            missing = sorted(expected_rounds - processed_rounds)
+            sample = ", ".join([f"r{r}" for r in missing[:10]])
             raise RuntimeError(
-                f"Simulator finished but {len(missing)} checkpoints are missing. Sample missing: {sample}"
+                f"Simulator finished but {len(missing)} aggregation rounds are missing. Sample missing: {sample}"
             )
 
         if not progressed:

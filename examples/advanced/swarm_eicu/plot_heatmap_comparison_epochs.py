@@ -51,7 +51,8 @@ def compute_iteration_auc(df):
 def load_results_for_config(base_dir, subdir, csv_filename):
     """
     Load all results for a given configuration type (swarm or central).
-    Returns a nested dictionary: results[lr][bs][epochs] = list of iteration AUCs.
+    New format: one folder per (total_epochs, iteration, lr, bs), one CSV with many epochs.
+    Returns a nested dictionary: results[lr][bs][epoch] = list of iteration AUCs.
     """
     results = {}
     dataset_path = Path(base_dir) / subdir
@@ -64,8 +65,7 @@ def load_results_for_config(base_dir, subdir, csv_filename):
             continue
         dir_name = dir_path.name
         try:
-            total_epochs = parse_epochs_from_dir(dir_name)
-            iteration = parse_iteration_from_dir(dir_name)
+            _ = parse_iteration_from_dir(dir_name)
             lr = parse_lr_from_dir(dir_name)
             bs = parse_bs_from_dir(dir_name)
         except Exception as e:
@@ -78,15 +78,17 @@ def load_results_for_config(base_dir, subdir, csv_filename):
 
         try:
             df = pd.read_csv(csv_path)
-            # For this run (iteration), we need the AUC at the final epoch.
-            # The CSV may contain rows for multiple epochs; we take the last epoch.
-            if 'epoch' in df.columns:
-                max_epoch = df['epoch'].max()
-                df = df[df['epoch'] == max_epoch]
-            iter_auc = compute_iteration_auc(df)
 
-            # Store in nested dict
-            results.setdefault(lr, {}).setdefault(bs, {}).setdefault(total_epochs, []).append(iter_auc)
+            if 'epoch' not in df.columns:
+                continue
+
+            # One CSV contains multiple checkpoints (epochs).
+            # Rebuild the same comparison space as before by treating each epoch
+            # as a candidate and collecting one AUC value per iteration.
+            for epoch_value, df_epoch in df.groupby('epoch'):
+                iter_auc = compute_iteration_auc(df_epoch)
+                epoch_int = int(epoch_value)
+                results.setdefault(lr, {}).setdefault(bs, {}).setdefault(epoch_int, []).append(iter_auc)
 
         except Exception as e:
             print(f"Error processing {csv_path}: {e}")
@@ -118,6 +120,23 @@ def compute_best_epoch_and_auc(results, lr_list, bs_list):
             best_epoch[i, j] = best[0]
             best_auc[i, j] = best[1]
     return best_auc, best_epoch
+
+def compute_auc_at_epoch(results, lr_list, bs_list, epoch):
+    """
+    For each (lr, bs), compute average AUC at a specific epoch.
+    Returns a 2D array (len(bs_list) x len(lr_list)).
+    """
+    auc_matrix = np.full((len(bs_list), len(lr_list)), np.nan)
+    for i, bs in enumerate(bs_list):
+        for j, lr in enumerate(lr_list):
+            if lr not in results or bs not in results[lr]:
+                continue
+            if epoch not in results[lr][bs]:
+                continue
+            auc_list = results[lr][bs][epoch]
+            if len(auc_list) > 0:
+                auc_matrix[i, j] = np.mean(auc_list)
+    return auc_matrix
 
 def prepare_3d_data(results, lr_list, bs_list):
     """
@@ -153,6 +172,29 @@ def get_common_lr_bs(results_a, results_b):
         bs_set.update(results_b[lr].keys())
     bs_list = sorted(bs_set)
     return lr_list, bs_list
+
+
+def get_mean_curve(results, lr, bs):
+    """
+    Build mean AUC curve by epoch for one (lr, bs).
+    Returns two arrays: epochs_sorted, auc_mean_sorted.
+    """
+    if lr not in results or bs not in results[lr]:
+        return np.array([]), np.array([])
+
+    epoch_auc = []
+    for epoch_value, auc_list in results[lr][bs].items():
+        if len(auc_list) == 0:
+            continue
+        epoch_auc.append((int(epoch_value), float(np.mean(auc_list))))
+
+    if not epoch_auc:
+        return np.array([]), np.array([])
+
+    epoch_auc.sort(key=lambda x: x[0])
+    epochs_sorted = np.array([x[0] for x in epoch_auc])
+    auc_mean_sorted = np.array([x[1] for x in epoch_auc])
+    return epochs_sorted, auc_mean_sorted
 
 # ------------------------------------------------------------------------------
 # Plotting functions
@@ -232,8 +274,8 @@ def main():
         "mimiciv_fixed": "mimiciv_fixed_12500_entire_testset_epochs",
     }
 
-    output_dir = Path("plots_results/epoch_analysis")
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_root = Path("plots_results/epochs_analysis")
+    output_root.mkdir(parents=True, exist_ok=True)
 
     # Colormap from the original script
     colors = ["#ffc6ba", "#ffd479", "#ffff66", "#a5db6f", "#7288cd"]
@@ -242,6 +284,8 @@ def main():
     # -------------------------------------------------------------------------
     for dataset_name, subdir in datasets.items():
         print(f"\nProcessing {dataset_name}...")
+        dataset_output_dir = output_root / dataset_name
+        dataset_output_dir.mkdir(parents=True, exist_ok=True)
 
         # Load swarm results
         swarm_results = load_results_for_config(SWARM_BASE, subdir, SWARM_CSV)
@@ -292,10 +336,116 @@ def main():
 
             fig.suptitle(f"{dataset_name}\nBest AUC per (lr, bs) across epochs", fontsize=16, y=1.02)
             plt.tight_layout()
-            heatmap_file = output_dir / f"{dataset_name}_best_auc_heatmap_3panel.png"
+            heatmap_file = dataset_output_dir / f"{dataset_name}_best_auc_heatmap_3panel.png"
             plt.savefig(heatmap_file, dpi=300, bbox_inches='tight')
             plt.close()
             print(f"Saved 3-panel heatmap: {heatmap_file}")
+
+            # --- Per-epoch heatmap matrix ------------------------------------
+            # Collect all epochs present in either swarm or central results
+            all_epochs = set()
+            for lr in lr_list:
+                for bs in bs_list:
+                    if lr in swarm_results and bs in swarm_results.get(lr, {}):
+                        all_epochs.update(swarm_results[lr][bs].keys())
+                    if lr in central_results and bs in central_results.get(lr, {}):
+                        all_epochs.update(central_results[lr][bs].keys())
+            all_epochs = sorted(all_epochs)
+            # Only proceed 10, 20, 30, etc
+            all_epochs = [epoch for epoch in all_epochs if epoch % 10 == 0]
+
+            if all_epochs:
+                # Precompute AUC matrices for every epoch to get a global vmin/vmax
+                swarm_epoch_matrices = {}
+                central_epoch_matrices = {}
+                for epoch in all_epochs:
+                    swarm_epoch_matrices[epoch] = compute_auc_at_epoch(swarm_results, lr_list, bs_list, epoch)
+                    central_epoch_matrices[epoch] = compute_auc_at_epoch(central_results, lr_list, bs_list, epoch)
+
+                all_swarm_vals = np.concatenate([m.flatten() for m in swarm_epoch_matrices.values()])
+                all_central_vals = np.concatenate([m.flatten() for m in central_epoch_matrices.values()])
+                epoch_vmin = np.nanmin(np.concatenate([all_swarm_vals, all_central_vals]))
+                epoch_vmax = np.nanmax(np.concatenate([all_swarm_vals, all_central_vals]))
+
+                cmap_delta = mcolors.ListedColormap(["#8b0000", "#ff4500", "#ffff66", "#66ff66", "#006400"])
+                norm_delta = mcolors.BoundaryNorm([-1, -0.05, -0.01, 0.01, 0.05, 1], cmap_delta.N)
+
+                n_epochs = len(all_epochs)
+                fig, axes = plt.subplots(
+                    n_epochs, 3,
+                    figsize=(30, 5 * n_epochs),
+                    squeeze=False
+                )
+
+                for row_idx, epoch in enumerate(all_epochs):
+                    auc_swarm_ep = swarm_epoch_matrices[epoch]
+                    auc_central_ep = central_epoch_matrices[epoch]
+                    diff_ep = np.where(
+                        ~np.isnan(auc_swarm_ep) & ~np.isnan(auc_central_ep),
+                        auc_swarm_ep - auc_central_ep,
+                        np.nan
+                    )
+
+                    im_s = plot_heatmap(
+                        axes[row_idx, 0], auc_swarm_ep, None, lr_list, bs_list,
+                        f"Swarm – epoch {epoch}", cmap_heat, epoch_vmin, epoch_vmax
+                    )
+                    fig.colorbar(im_s, ax=axes[row_idx, 0], orientation='vertical', shrink=0.8).set_label('AUC')
+
+                    im_c = plot_heatmap(
+                        axes[row_idx, 1], auc_central_ep, None, lr_list, bs_list,
+                        f"Central – epoch {epoch}", cmap_heat, epoch_vmin, epoch_vmax
+                    )
+                    fig.colorbar(im_c, ax=axes[row_idx, 1], orientation='vertical', shrink=0.8).set_label('AUC')
+
+                    im_d = plot_heatmap(
+                        axes[row_idx, 2], diff_ep, None, lr_list, bs_list,
+                        f"Swarm - Central – epoch {epoch}", cmap_delta, None, None, norm=norm_delta
+                    )
+                    fig.colorbar(im_d, ax=axes[row_idx, 2], orientation='vertical', shrink=0.8).set_label('Δ AUC')
+
+                fig.suptitle(f"{dataset_name}\nAUC per (lr, bs) at each epoch", fontsize=18, y=1.002)
+                plt.tight_layout()
+                epoch_heatmap_file = dataset_output_dir / f"{dataset_name}_epoch_evolution_heatmaps.png"
+                plt.savefig(epoch_heatmap_file, dpi=150, bbox_inches='tight')
+                plt.close()
+                print(f"Saved per-epoch heatmap matrix: {epoch_heatmap_file}")
+
+        # --- Line plots per (lr, bs): x=Epoch, y=AUC ------------------------
+        line_plots_dir = dataset_output_dir / "line_plots"
+        line_plots_dir.mkdir(parents=True, exist_ok=True)
+
+        for lr in lr_list:
+            for bs in bs_list:
+                epochs_swarm, auc_swarm = get_mean_curve(swarm_results, lr, bs)
+                epochs_central, auc_central = get_mean_curve(central_results, lr, bs)
+
+                if len(epochs_swarm) == 0 and len(epochs_central) == 0:
+                    continue
+
+                fig, ax = plt.subplots(figsize=(16, 8))
+
+                if len(epochs_swarm) > 0:
+                    ax.plot(epochs_swarm, auc_swarm, marker='o', linewidth=2, markersize=4, label='Swarm')
+
+                if len(epochs_central) > 0:
+                    ax.plot(epochs_central, auc_central, marker='s', linewidth=2, markersize=4, label='Central')
+
+                ax.set_xlim(0, 155)
+                ax.set_xticks(np.arange(0, 155, 5))
+                ax.set_ylim(0.4, 0.9)
+                ax.set_xlabel('Epoch', fontsize=12)
+                ax.set_ylabel('AUC', fontsize=12)
+                ax.set_title(f"{dataset_name} | lr={lr:.5f}, bs={bs}", fontsize=12)
+                ax.grid(True, alpha=0.3)
+                ax.legend(loc='lower right')
+
+                lr_label = f"{lr:.5f}".replace('.', '-')
+                line_file = line_plots_dir / f"line_lr{lr_label}_bs{bs}.png"
+                plt.tight_layout()
+                plt.savefig(line_file, dpi=300, bbox_inches='tight')
+                plt.close()
+                print(f"Saved line graph: {line_file}")
 
         # --- 3D Scatter plots (2 subplots side by side) ----------------------
         if SCATTER:
@@ -322,7 +472,7 @@ def main():
 
             fig.suptitle(f"{dataset_name}\nAUC vs (LR, BS, Epochs)", fontsize=16, y=1.02)
             plt.tight_layout()
-            scatter_file = output_dir / f"{dataset_name}_3d_scatter_pair.png"
+            scatter_file = dataset_output_dir / f"{dataset_name}_3d_scatter_pair.png"
             plt.savefig(scatter_file, dpi=300, bbox_inches='tight')
             plt.close()
             print(f"Saved 3D scatter pair: {scatter_file}")
