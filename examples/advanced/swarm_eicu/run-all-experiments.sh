@@ -16,7 +16,7 @@ fi
 echo "Generating configs in ${CONFIG_DIR} ..."
 "${PYTHON_BIN}" generate_configs_eicu.py --base-dir "${CONFIG_DIR}" --iterations 5
 
-mapfile -t CONFIG_FILES < <(find "${CONFIG_DIR}" -maxdepth 1 -type f -name "*.json" | sort -r)
+mapfile -t CONFIG_FILES < <(find "${CONFIG_DIR}" -maxdepth 1 -type f -name "*.json" | sort)
 
 if [[ ${#CONFIG_FILES[@]} -eq 0 ]]; then
   echo "No config files found in ${CONFIG_DIR}"

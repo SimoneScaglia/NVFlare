@@ -196,21 +196,28 @@ def _mosaic_group_intervals(max_nodes: int):
 
 
 def _mosaic_group_spans(max_nodes: int):
-    """Build full-width table spans matching node intervals.
+    """Build table spans aligned to integer node boundaries.
 
-    Spans cover the whole axis width [1.5, max_nodes+0.5] while labels remain
-    2-5, 5-10, 10-15, ... for readability.
+    The first span starts at node 2 and the last one ends at max_nodes.
+    Internal boundaries are contiguous and placed on
+    multiples of 5, e.g. one group ends at 15 and the next starts at 15.
     """
     intervals = _mosaic_group_intervals(max_nodes)
     if not intervals:
         return []
 
     spans = []
-    for idx, (left_label, right_label) in enumerate(intervals):
-        span_left = 1.5 if idx == 0 else float(left_label) - 0.5
-        span_right = max_nodes + 0.5 if right_label == max_nodes else float(right_label) + 0.5
+    for idx, (_, right_label) in enumerate(intervals):
+        span_left = 2.0 if idx == 0 else float(intervals[idx - 1][1])
+        span_right = float(max_nodes) if right_label == max_nodes else float(right_label)
+        left_label = intervals[idx][0]
         spans.append((span_left, span_right, left_label, right_label))
     return spans
+
+
+def _up_to_nodes_label(cfg: dict) -> str:
+    """Legend/row label for a configuration using node count only."""
+    return f"Up to {cfg['max_nodes']} nodes - {_rows_per_node_from_label(cfg['label'])} rows/node"
 
 
 def _get_params_for_interval(df: pd.DataFrame, config_name: str, start_node: int, end_node: int):
@@ -275,6 +282,7 @@ def _draw_mosaic_hyperparam_table(table_ax, max_nodes, config_name, local_df, ce
     row_h = MOSAIC_TABLE_ROW_HEIGHT
     table_height = total_rows * row_h
 
+    # Keep the same axis padding as the plot; table cells use spans from 2..max_nodes.
     table_ax.set_xlim(1.5, max_nodes + 0.5)
     table_ax.set_ylim(table_height, 0)
     table_ax.set_xticks([])
@@ -283,9 +291,9 @@ def _draw_mosaic_hyperparam_table(table_ax, max_nodes, config_name, local_df, ce
         spine.set_visible(False)
 
     row_pairs = [
-        ("SW", swarm_df, 0),
-        ("CE", central_df, 2),
-        ("LO", local_df, 4),
+        ("SL", swarm_df, 0),
+        ("CL", central_df, 2),
+        ("LL", local_df, 4),
     ]
 
     for _, df, start_row_idx in row_pairs:
@@ -314,15 +322,16 @@ def _draw_mosaic_hyperparam_table(table_ax, max_nodes, config_name, local_df, ce
                     fontweight="normal",
                 )
 
-    # Emphasize separators between Swarm/Central and Central/Local blocks.
-    table_ax.axhline(2 * row_h, color="#7f7f7f", linewidth=MOSAIC_TABLE_DIVIDER_WIDTH)
-    table_ax.axhline(4 * row_h, color="#7f7f7f", linewidth=MOSAIC_TABLE_DIVIDER_WIDTH)
+    # Emphasize separators between Swarm/Central and Central/Local blocks,
+    # but only across the real table extent (2..max_nodes).
+    table_ax.plot([2, max_nodes], [2 * row_h, 2 * row_h], color="#7f7f7f", linewidth=MOSAIC_TABLE_DIVIDER_WIDTH)
+    table_ax.plot([2, max_nodes], [4 * row_h, 4 * row_h], color="#7f7f7f", linewidth=MOSAIC_TABLE_DIVIDER_WIDTH)
 
-    table_ax.axvline(1.5, color="#b8b8b8", linewidth=MOSAIC_TABLE_DIVIDER_WIDTH)
-    table_ax.axvline(max_nodes + 0.5, color="#b8b8b8", linewidth=MOSAIC_TABLE_DIVIDER_WIDTH)
+    table_ax.axvline(2, color="#b8b8b8", linewidth=MOSAIC_TABLE_DIVIDER_WIDTH)
+    table_ax.axvline(max_nodes, color="#b8b8b8", linewidth=MOSAIC_TABLE_DIVIDER_WIDTH)
 
     trans = table_ax.get_yaxis_transform()
-    labels = ["SW LR", "SW BS", "CE LR", "CE BS", "LO LR", "LO BS"]
+    labels = ["SL LR", "SL BS", "CL LR", "CL BS", "LL LR", "LL BS"]
     for row_idx, label in enumerate(labels):
         table_ax.text(
             -0.02,
@@ -336,6 +345,181 @@ def _draw_mosaic_hyperparam_table(table_ax, max_nodes, config_name, local_df, ce
         )
 
         # Removed interval labels from table cells
+
+
+def _draw_swarm_comparison_hyperparam_table_nodes(table_ax, cfgs, swarm_df, global_max_nodes):
+    """Draw LR/BS table for all swarm configurations aligned to num_nodes axis."""
+    if not cfgs:
+        table_ax.axis("off")
+        return
+
+    total_rows = 2 * len(cfgs)
+    row_h = MOSAIC_TABLE_ROW_HEIGHT
+    table_height = total_rows * row_h
+
+    # Keep plot padding on x while table cells occupy only 2..n.
+    table_ax.set_xlim(1.5, global_max_nodes + 0.5)
+    table_ax.set_ylim(table_height, 0)
+    table_ax.set_xticks([])
+    table_ax.set_yticks([])
+    for spine in table_ax.spines.values():
+        spine.set_visible(False)
+
+    for cfg_idx, cfg in enumerate(cfgs):
+        start_row_idx = cfg_idx * 2
+        spans = _mosaic_group_spans(cfg["max_nodes"])
+        runs = _pair_runs_for_spans(swarm_df, cfg["name"], spans)
+        for run in runs:
+            for row_offset, value in enumerate([run["lr"], run["bs"]]):
+                row_idx = start_row_idx + row_offset
+                table_ax.add_patch(
+                    plt.Rectangle(
+                        (run["left"], row_idx * row_h),
+                        run["right"] - run["left"],
+                        row_h,
+                        fill=False,
+                        edgecolor="#b8b8b8",
+                        linewidth=MOSAIC_TABLE_BORDER_WIDTH,
+                    )
+                )
+                table_ax.text(
+                    (run["left"] + run["right"]) / 2,
+                    row_idx * row_h + (row_h / 2),
+                    value,
+                    ha="center",
+                    va="center",
+                    fontsize=MOSAIC_TITLE_FONTSIZE,
+                    fontweight="normal",
+                )
+
+    # Bold separators between configuration blocks, limited to useful extent.
+    for cfg_idx in range(1, len(cfgs)):
+        y = cfg_idx * 2 * row_h
+        right = max(cfgs[cfg_idx - 1]["max_nodes"], cfgs[cfg_idx]["max_nodes"])
+        table_ax.plot([2, right], [y, y], color="#7f7f7f", linewidth=MOSAIC_TABLE_DIVIDER_WIDTH)
+
+    trans = table_ax.get_yaxis_transform()
+    for cfg_idx, cfg in enumerate(cfgs):
+        row_base = cfg_idx * 2
+        color = SWARM_COLORS.get(cfg["name"], "#333333")
+        for row_offset, param_label in enumerate(["LR", "BS"]):
+            y = (row_base + row_offset) * row_h + (row_h / 2)
+            x0, x1 = -0.052, -0.032
+            xm = (x0 + x1) / 2
+            table_ax.plot([x0, x1], [y, y], transform=trans, color=color, linewidth=2.0, clip_on=False)
+            table_ax.plot([xm], [y], transform=trans, marker="o", color=color, markersize=4, clip_on=False)
+            table_ax.text(
+                -0.022,
+                y,
+                param_label,
+                transform=trans,
+                ha="left",
+                va="center",
+                fontsize=MOSAIC_TITLE_FONTSIZE,
+                fontweight="bold",
+            )
+
+
+def _rows_group_spans(max_nodes: int, rows_per_node: int):
+    """Build spans in total-row units aligned to integer node boundaries.
+
+    The first span starts at node 2 and the last span ends at max_nodes.
+    Internal boundaries are contiguous and placed on multiples of 5 nodes,
+    mapped to total-row units.
+    """
+    intervals = _mosaic_group_intervals(max_nodes)
+    if not intervals:
+        return []
+
+    spans = []
+    first_x = 2 * rows_per_node
+    last_x = max_nodes * rows_per_node
+    for idx, (_, right_label) in enumerate(intervals):
+        span_left = first_x if idx == 0 else intervals[idx - 1][1] * rows_per_node
+        span_right = last_x if right_label == max_nodes else right_label * rows_per_node
+        left_label = intervals[idx][0]
+        spans.append((span_left, span_right, left_label, right_label))
+    return spans
+
+
+def _draw_swarm_comparison_hyperparam_table_rows(table_ax, cfgs, swarm_df, x_min, x_max):
+    """Draw LR/BS table for all swarm configurations aligned to total-rows axis."""
+    if not cfgs:
+        table_ax.axis("off")
+        return
+
+    total_rows = 2 * len(cfgs)
+    row_h = MOSAIC_TABLE_ROW_HEIGHT
+    table_height = total_rows * row_h
+
+    table_ax.set_xlim(x_min, x_max)
+    table_ax.set_ylim(table_height, 0)
+    table_ax.set_xticks([])
+    table_ax.set_yticks([])
+    for spine in table_ax.spines.values():
+        spine.set_visible(False)
+
+    for cfg_idx, cfg in enumerate(cfgs):
+        start_row_idx = cfg_idx * 2
+        rows_per_node = _rows_per_node_from_label(cfg["label"])
+        spans = _rows_group_spans(cfg["max_nodes"], rows_per_node)
+        runs = _pair_runs_for_spans(swarm_df, cfg["name"], spans)
+        for run in runs:
+            for row_offset, value in enumerate([run["lr"], run["bs"]]):
+                row_idx = start_row_idx + row_offset
+                table_ax.add_patch(
+                    plt.Rectangle(
+                        (run["left"], row_idx * row_h),
+                        run["right"] - run["left"],
+                        row_h,
+                        fill=False,
+                        edgecolor="#b8b8b8",
+                        linewidth=MOSAIC_TABLE_BORDER_WIDTH,
+                    )
+                )
+                table_ax.text(
+                    (run["left"] + run["right"]) / 2,
+                    row_idx * row_h + (row_h / 2),
+                    value,
+                    ha="center",
+                    va="center",
+                    fontsize=MOSAIC_TITLE_FONTSIZE,
+                    fontweight="normal",
+                )
+
+    # Bold separators between configuration blocks, limited to useful extent.
+    for cfg_idx in range(1, len(cfgs)):
+        y = cfg_idx * 2 * row_h
+        prev_cfg = cfgs[cfg_idx - 1]
+        curr_cfg = cfgs[cfg_idx]
+        prev_left = 2 * _rows_per_node_from_label(prev_cfg["label"])
+        curr_left = 2 * _rows_per_node_from_label(curr_cfg["label"])
+        prev_right = prev_cfg["max_nodes"] * _rows_per_node_from_label(prev_cfg["label"])
+        curr_right = curr_cfg["max_nodes"] * _rows_per_node_from_label(curr_cfg["label"])
+        left = min(prev_left, curr_left)
+        right = max(prev_right, curr_right)
+        table_ax.plot([left, right], [y, y], color="#7f7f7f", linewidth=MOSAIC_TABLE_DIVIDER_WIDTH)
+
+    trans = table_ax.get_yaxis_transform()
+    for cfg_idx, cfg in enumerate(cfgs):
+        row_base = cfg_idx * 2
+        color = SWARM_COLORS.get(cfg["name"], "#333333")
+        for row_offset, param_label in enumerate(["LR", "BS"]):
+            y = (row_base + row_offset) * row_h + (row_h / 2)
+            x0, x1 = -0.052, -0.032
+            xm = (x0 + x1) / 2
+            table_ax.plot([x0, x1], [y, y], transform=trans, color=color, linewidth=2.0, clip_on=False)
+            table_ax.plot([xm], [y], transform=trans, marker="o", color=color, markersize=4, clip_on=False)
+            table_ax.text(
+                -0.022,
+                y,
+                param_label,
+                transform=trans,
+                ha="left",
+                va="center",
+                fontsize=MOSAIC_TITLE_FONTSIZE,
+                fontweight="bold",
+            )
 
 
 def _annotate_hyperparams(ax, dataset, config_name, max_nodes, local_df, central_df, swarm_df):
@@ -490,10 +674,14 @@ def plot_metric_mosaic(metric, ylabel, output_filename, dataset, ylim=None):
         _plot_three_series(ax, local_df, central_df, swarm_df, config_name, x_range, metric, linewidth=1.5, markersize=3)
 
         ax.set_xlim(1.5, max_nodes + 0.5)
-        step = max(1, max_nodes // 10)
-        xticks = np.arange(2, max_nodes + 1, step)
-        if xticks[-1] != max_nodes:
-            xticks = np.append(xticks, max_nodes)
+        if max_nodes >= 40:
+            xticks = np.arange(5, max_nodes + 1, 5)
+            xticks = np.insert(xticks, 0, 2)
+        else:
+            step = max(1, max_nodes // 10)
+            xticks = np.arange(2, max_nodes + 1, step)
+            if xticks[-1] != max_nodes:
+                xticks = np.append(xticks, max_nodes)
         ax.set_xticks(xticks)
         ax.tick_params(axis="x", labelsize=6)
         ax.tick_params(axis="y", labelsize=7)
@@ -620,9 +808,13 @@ def plot_swarm_comparison_nodes(metric, ylabel, output_filename, dataset, ylim=N
         return
     swarm_df = _drop_zero_auc_rows(pd.read_csv(swarm_csv))
     dataset_name = DATASET_NAMES.get(dataset, dataset.upper())
-    fig, ax = plt.subplots(figsize=(16, 4))
     cfgs = CONFIGS[dataset]
     global_max = max(c["max_nodes"] for c in cfgs)
+
+    fig = plt.figure(figsize=(16, 6.8))
+    panel_spec = fig.add_gridspec(2, 1, height_ratios=[4.0, 3.0], hspace=0.22)
+    ax = fig.add_subplot(panel_spec[0])
+    table_ax = fig.add_subplot(panel_spec[1])
 
     for cfg in cfgs:
         config_name = cfg["name"]
@@ -631,7 +823,15 @@ def plot_swarm_comparison_nodes(metric, ylabel, output_filename, dataset, ylim=N
         if agg is None:
             continue
         color = SWARM_COLORS.get(config_name, "#333333")
-        ax.plot(agg["num_nodes"], agg["mean"], "o-", color=color, label=cfg["label"], linewidth=2, markersize=4)
+        ax.plot(
+            agg["num_nodes"],
+            agg["mean"],
+            "o-",
+            color=color,
+            label=_up_to_nodes_label(cfg),
+            linewidth=2,
+            markersize=4,
+        )
 
     ax.set_xlim(1.5, global_max + 0.5)
     ax.set_xticks(np.arange(2, global_max + 1))
@@ -641,6 +841,9 @@ def plot_swarm_comparison_nodes(metric, ylabel, output_filename, dataset, ylim=N
     ax.set_title(f"{dataset_name} - Swarm Learning - {ylabel} comparison", fontsize=14, fontweight="bold", pad=10)
     ax.legend(fontsize=11, loc="best")
     ax.grid(True, alpha=0.3)
+
+    _draw_swarm_comparison_hyperparam_table_nodes(table_ax, cfgs, swarm_df, global_max)
+
     plt.tight_layout()
     _save(fig, dataset, output_filename)
 
@@ -654,7 +857,10 @@ def plot_swarm_comparison_rows(metric, ylabel, output_filename, dataset, ylim=No
         return
     swarm_df = _drop_zero_auc_rows(pd.read_csv(swarm_csv))
     dataset_name = DATASET_NAMES.get(dataset, dataset.upper())
-    fig, ax = plt.subplots(figsize=(16, 4))
+    fig = plt.figure(figsize=(16, 6.8))
+    panel_spec = fig.add_gridspec(2, 1, height_ratios=[4.0, 3.0], hspace=0.22)
+    ax = fig.add_subplot(panel_spec[0])
+    table_ax = fig.add_subplot(panel_spec[1])
     max_total_rows = 0
 
     for cfg in CONFIGS[dataset]:
@@ -667,12 +873,22 @@ def plot_swarm_comparison_rows(metric, ylabel, output_filename, dataset, ylim=No
         rows_per_node = _rows_per_node_from_label(cfg["label"])
         agg["total_rows"] = agg["num_nodes"] * rows_per_node
         color = SWARM_COLORS.get(config_name, "#333333")
-        ax.plot(agg["total_rows"], agg["mean"], "o-", color=color, label="Up to " + cfg["label"], linewidth=2, markersize=4)
+        ax.plot(
+            agg["total_rows"],
+            agg["mean"],
+            "o-",
+            color=color,
+            label=_up_to_nodes_label(cfg),
+            linewidth=2,
+            markersize=4,
+        )
         current_max = rows_per_node * max_nodes
         if current_max > max_total_rows:
             max_total_rows = current_max
 
-    ax.set_xlim(-max_total_rows * 0.01, max_total_rows * 1.01)
+    x_min = -max_total_rows * 0.01
+    x_max = max_total_rows * 1.01
+    ax.set_xlim(x_min, x_max)
     ax.xaxis.set_major_locator(MultipleLocator(2000))
     ax.tick_params(axis="x", labelsize=7)
     ax.set_xlabel("Total number of rows", fontsize=12, fontweight="bold")
@@ -680,6 +896,10 @@ def plot_swarm_comparison_rows(metric, ylabel, output_filename, dataset, ylim=No
     ax.set_title(f"{dataset_name} - Swarm Learning - {ylabel} comparison by total rows", fontsize=14, fontweight="bold", pad=10)
     ax.legend(fontsize=11, loc="lower right", ncol=2)
     ax.grid(True, alpha=0.3)
+
+    # Use plot x-limits for axis alignment; table cells and borders are drawn on real 2..n range.
+    _draw_swarm_comparison_hyperparam_table_rows(table_ax, CONFIGS[dataset], swarm_df, x_min, x_max)
+
     plt.tight_layout()
     _save(fig, dataset, output_filename)
 
@@ -732,9 +952,9 @@ def _save(fig, dataset, filename):
 # ── Main ───────────────────────────────────────────────────────────────
 
 def main(dataset: str):
-    plot_metric_mosaic("auc", "AUC (mean)", "mosaic_plot_auc.png", dataset)
-    plot_swarm_comparison_nodes("auc", "AUC (mean)", "swarm_comparison_nodes_plot_auc.png", dataset)
-    plot_swarm_comparison_rows("auc", "AUC (mean)", "swarm_comparison_rows_plot_auc.png", dataset)
+    plot_metric_mosaic("auc", "AUC (mean)", "mosaic_with_hyperparameters_plot_auc.png", dataset)
+    plot_swarm_comparison_nodes("auc", "AUC (mean)", "swarm_comparison_nodes_with_hyperparameters_plot_auc.png", dataset)
+    plot_swarm_comparison_rows("auc", "AUC (mean)", "swarm_comparison_rows_with_hyperparameters_plot_auc.png", dataset)
 
     print(f"\nDone - all plots created for {dataset}.")
 

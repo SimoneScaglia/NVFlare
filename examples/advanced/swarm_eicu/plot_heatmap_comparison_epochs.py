@@ -257,6 +257,7 @@ def plot_3d_scatter_pair(ax, x, y, z, c, title):
 def main():
     # --- Configuration -------------------------------------------------------
     HEATMAP = True
+    LINEPLOTS = False
     SCATTER = False
 
     # Base directories where results are stored
@@ -412,40 +413,41 @@ def main():
                 print(f"Saved per-epoch heatmap matrix: {epoch_heatmap_file}")
 
         # --- Line plots per (lr, bs): x=Epoch, y=AUC ------------------------
-        line_plots_dir = dataset_output_dir / "line_plots"
-        line_plots_dir.mkdir(parents=True, exist_ok=True)
+        if LINEPLOTS:
+            line_plots_dir = dataset_output_dir / "line_plots"
+            line_plots_dir.mkdir(parents=True, exist_ok=True)
 
-        for lr in lr_list:
-            for bs in bs_list:
-                epochs_swarm, auc_swarm = get_mean_curve(swarm_results, lr, bs)
-                epochs_central, auc_central = get_mean_curve(central_results, lr, bs)
+            for lr in lr_list:
+                for bs in bs_list:
+                    epochs_swarm, auc_swarm = get_mean_curve(swarm_results, lr, bs)
+                    epochs_central, auc_central = get_mean_curve(central_results, lr, bs)
 
-                if len(epochs_swarm) == 0 and len(epochs_central) == 0:
-                    continue
+                    if len(epochs_swarm) == 0 and len(epochs_central) == 0:
+                        continue
 
-                fig, ax = plt.subplots(figsize=(16, 8))
+                    fig, ax = plt.subplots(figsize=(16, 8))
 
-                if len(epochs_swarm) > 0:
-                    ax.plot(epochs_swarm, auc_swarm, marker='o', linewidth=2, markersize=4, label='Swarm')
+                    if len(epochs_swarm) > 0:
+                        ax.plot(epochs_swarm, auc_swarm, marker='o', linewidth=2, markersize=4, label='Swarm')
 
-                if len(epochs_central) > 0:
-                    ax.plot(epochs_central, auc_central, marker='s', linewidth=2, markersize=4, label='Central')
+                    if len(epochs_central) > 0:
+                        ax.plot(epochs_central, auc_central, marker='s', linewidth=2, markersize=4, label='Central')
 
-                ax.set_xlim(0, 155)
-                ax.set_xticks(np.arange(0, 155, 5))
-                ax.set_ylim(0.4, 0.9)
-                ax.set_xlabel('Epoch', fontsize=12)
-                ax.set_ylabel('AUC', fontsize=12)
-                ax.set_title(f"{dataset_name} | lr={lr:.5f}, bs={bs}", fontsize=12)
-                ax.grid(True, alpha=0.3)
-                ax.legend(loc='lower right')
+                    ax.set_xlim(0, 155)
+                    ax.set_xticks(np.arange(0, 155, 5))
+                    ax.set_ylim(0.4, 0.9)
+                    ax.set_xlabel('Epoch', fontsize=12)
+                    ax.set_ylabel('AUC', fontsize=12)
+                    ax.set_title(f"{dataset_name} | lr={lr:.5f}, bs={bs}", fontsize=12)
+                    ax.grid(True, alpha=0.3)
+                    ax.legend(loc='lower right')
 
-                lr_label = f"{lr:.5f}".replace('.', '-')
-                line_file = line_plots_dir / f"line_lr{lr_label}_bs{bs}.png"
-                plt.tight_layout()
-                plt.savefig(line_file, dpi=300, bbox_inches='tight')
-                plt.close()
-                print(f"Saved line graph: {line_file}")
+                    lr_label = f"{lr:.5f}".replace('.', '-')
+                    line_file = line_plots_dir / f"line_lr{lr_label}_bs{bs}.png"
+                    plt.tight_layout()
+                    plt.savefig(line_file, dpi=300, bbox_inches='tight')
+                    plt.close()
+                    print(f"Saved line graph: {line_file}")
 
         # --- 3D Scatter plots (2 subplots side by side) ----------------------
         if SCATTER:

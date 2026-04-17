@@ -1,0 +1,53 @@
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras.metrics import AUC, BinaryAccuracy, Precision, Recall
+tf.keras.utils.set_random_seed(42)
+
+class FCN(tf.keras.Model):
+    def __init__(self, input_dim=40):
+        super().__init__()
+        self._input_shape = (None, input_dim)  # Aggiungi questo attributo
+        self.model = get_net(input_dim)
+
+    def call(self, inputs):
+        return self.model(inputs)
+
+def get_net(input_shape):
+    num_nodes = 1024
+    dropout_rate = 0.3
+    l1_v = 0.0
+    l2_v = 0.005
+
+    return tf.keras.Sequential([
+        tf.keras.layers.Dense(256, activation='relu', kernel_regularizer = tf.keras.regularizers.l1_l2(l1=0.0, l2=0.0), input_shape=(input_shape,)),
+        tf.keras.layers.Dropout(0.4),
+        tf.keras.layers.Dense(num_nodes, activation='relu', kernel_regularizer = tf.keras.regularizers.l1_l2(l1=l1_v, l2=l2_v), input_shape=(input_shape,)),
+        tf.keras.layers.Dropout(dropout_rate),
+        tf.keras.layers.Dense(int(num_nodes / 2), activation='relu', kernel_regularizer = tf.keras.regularizers.l1_l2(l1=l1_v, l2=l2_v), input_shape=(input_shape,)),
+        tf.keras.layers.Dropout(dropout_rate),
+        tf.keras.layers.Dense(int(num_nodes / 2), activation='relu', kernel_regularizer = tf.keras.regularizers.l1_l2(l1=l1_v, l2=l2_v), input_shape=(input_shape,)),
+        tf.keras.layers.Dropout(dropout_rate),
+        tf.keras.layers.Dense(int(num_nodes / 4), activation='relu', kernel_regularizer = tf.keras.regularizers.l1_l2(l1=l1_v, l2=l2_v), input_shape=(input_shape,)),
+        tf.keras.layers.Dropout(dropout_rate),
+        tf.keras.layers.Dense(int(num_nodes / 4), activation='relu', kernel_regularizer = tf.keras.regularizers.l1_l2(l1=l1_v, l2=l2_v), input_shape=(input_shape,)),
+        tf.keras.layers.Dropout(dropout_rate),
+        tf.keras.layers.Dense(int(num_nodes / 8), activation='relu', kernel_regularizer = tf.keras.regularizers.l1_l2(l1=l1_v, l2=l2_v), input_shape=(input_shape,)),
+        tf.keras.layers.Dropout(dropout_rate),
+        tf.keras.layers.Dense(int(num_nodes / 8), activation='relu', kernel_regularizer = tf.keras.regularizers.l1_l2(l1=l1_v, l2=l2_v), input_shape=(input_shape,)),
+        tf.keras.layers.Dropout(dropout_rate),
+        tf.keras.layers.Dense(int(num_nodes / 16), activation='relu', kernel_regularizer = tf.keras.regularizers.l1_l2(l1=l1_v, l2=l2_v), input_shape=(input_shape,)),
+        tf.keras.layers.Dropout(dropout_rate),
+        tf.keras.layers.Dense(units = 1, activation = "sigmoid")
+    ])
+
+def get_opt():
+    return tf.keras.optimizers.Adam(learning_rate=0.01)    ### LEARNING RATE
+
+def get_metrics():
+    return [
+        AUC(name='auc', curve='ROC', num_thresholds=1000),
+        AUC(name='auprc', curve='PR', num_thresholds=1000),
+        BinaryAccuracy(name='accuracy'),
+        Precision(name='precision'),
+        Recall(name='recall')
+    ]
