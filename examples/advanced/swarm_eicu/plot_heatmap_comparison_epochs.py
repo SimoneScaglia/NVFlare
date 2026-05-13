@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
+import argparse
 from matplotlib.colors import LinearSegmentedColormap
 import matplotlib.colors as mcolors
 
@@ -48,7 +49,52 @@ def compute_iteration_auc(df):
     else:
         return df["auc"].mean()
 
-def load_results_for_config(base_dir, subdir, csv_filename):
+
+def compute_separate_testset_iteration_aucs(df_epoch):
+    """
+    Compute one AUC per iteration for separate-testset evaluations.
+
+    In separate-testset mode, each epoch has one row per user/site.
+    We first aggregate users within each iteration+epoch, then average
+    across iterations later in the pipeline.
+    """
+    if "iteration" in df_epoch.columns:
+        return [compute_iteration_auc(df_iter) for _, df_iter in df_epoch.groupby("iteration")]
+    return [compute_iteration_auc(df_epoch)]
+
+
+def is_separate_testset_epoch(df_epoch):
+    """
+    Detect separate-testset rows by checking whether we have per-user rows
+    rather than a pre-aggregated global user (e.g. swarm_global/central).
+    """
+    if "user" not in df_epoch.columns:
+        return False
+
+    users = {str(u).strip().lower() for u in df_epoch["user"].dropna().astype(str)}
+    if not users:
+        return False
+
+    if "swarm_global" in users:
+        return False
+    if users == {"central"}:
+        return False
+
+    return len(users) > 1
+
+
+def get_existing_csv_path(dir_path, csv_filenames):
+    """Return the first existing CSV path from a filename or list of filenames."""
+    if isinstance(csv_filenames, str):
+        csv_filenames = [csv_filenames]
+
+    for filename in csv_filenames:
+        csv_path = dir_path / filename
+        if csv_path.exists():
+            return csv_path
+    return None
+
+def load_results_for_config(base_dir, subdir, csv_filenames):
     """
     Load all results for a given configuration type (swarm or central).
     New format: one folder per (total_epochs, iteration, lr, bs), one CSV with many epochs.
@@ -72,8 +118,8 @@ def load_results_for_config(base_dir, subdir, csv_filename):
             # Skip directories that don't match the expected pattern
             continue
 
-        csv_path = dir_path / csv_filename
-        if not csv_path.exists():
+        csv_path = get_existing_csv_path(dir_path, csv_filenames)
+        if csv_path is None:
             continue
 
         try:
@@ -83,12 +129,18 @@ def load_results_for_config(base_dir, subdir, csv_filename):
                 continue
 
             # One CSV contains multiple checkpoints (epochs).
-            # Rebuild the same comparison space as before by treating each epoch
-            # as a candidate and collecting one AUC value per iteration.
+            # Entire-testset mode: one pre-aggregated row per epoch.
+            # Separate-testset mode: one row per user/site per epoch.
+            # In separate mode we aggregate users first, then keep one value per
+            # iteration so later code can average across iterations.
             for epoch_value, df_epoch in df.groupby('epoch'):
-                iter_auc = compute_iteration_auc(df_epoch)
                 epoch_int = int(epoch_value)
-                results.setdefault(lr, {}).setdefault(bs, {}).setdefault(epoch_int, []).append(iter_auc)
+                if is_separate_testset_epoch(df_epoch):
+                    iter_aucs = compute_separate_testset_iteration_aucs(df_epoch)
+                else:
+                    iter_aucs = [compute_iteration_auc(df_epoch)]
+
+                results.setdefault(lr, {}).setdefault(bs, {}).setdefault(epoch_int, []).extend(iter_aucs)
 
         except Exception as e:
             print(f"Error processing {csv_path}: {e}")
@@ -196,11 +248,51 @@ def get_mean_curve(results, lr, bs):
     auc_mean_sorted = np.array([x[1] for x in epoch_auc])
     return epochs_sorted, auc_mean_sorted
 
+
+def compute_max_mask(data):
+    """Return a boolean mask selecting all cells equal to the matrix maximum."""
+    if data.size == 0 or np.all(np.isnan(data)):
+        return np.zeros_like(data, dtype=bool)
+    max_value = np.nanmax(data)
+    return np.isclose(data, max_value, rtol=1e-10, atol=1e-12)
+
+
+def create_continuous_delta_cmap(vmin, vmax):
+    """
+    Create a continuous colormap for difference heatmaps that preserves
+    the visual thresholds around [-0.05, -0.01, 0.01, 0.05] but blends
+    smoothly between them. Returns (cmap, norm).
+    """
+    # Core colors: deep red, orange, yellow (for near-zero), yellow again,
+    # light green, dark green
+    colors = ["#8b0000", "#ff4500", "#ffff66", "#ffff66", "#66ff66", "#006400"]
+
+    # Make symmetric range around zero so thresholds are absolute values
+    sym = max(abs(vmin), abs(vmax)) if (vmin is not None and vmax is not None) else 1.0
+    # Define absolute breakpoints we want to emphasize
+    breakpoints = [-sym, -0.05, -0.01, 0.01, 0.05, sym]
+
+    # Map breakpoints into 0..1 positions for the colormap
+    if sym == 0:
+        positions = [0.0 for _ in breakpoints]
+    else:
+        positions = [float((bp - (-sym)) / (2 * sym)) for bp in breakpoints]
+
+    # Clamp positions to [0, 1]
+    positions = [min(max(p, 0.0), 1.0) for p in positions]
+
+    # Build a continuous LinearSegmentedColormap with explicit stops
+    cmap = LinearSegmentedColormap.from_list("delta_continuous", list(zip(positions, colors)), N=256)
+
+    # Use a symmetric Normalize to center zero
+    norm = mcolors.Normalize(vmin=-sym, vmax=sym)
+    return cmap, norm
+
 # ------------------------------------------------------------------------------
 # Plotting functions
 # ------------------------------------------------------------------------------
 
-def plot_heatmap(ax, data, epochs, lr_list, bs_list, title, cmap, vmin=None, vmax=None, norm=None):
+def plot_heatmap(ax, data, epochs, lr_list, bs_list, title, cmap, vmin=None, vmax=None, norm=None, bold_mask=None):
     """
     Draw a single heatmap on the given axes.
     data: 2D array (bs x lr) of values.
@@ -236,7 +328,8 @@ def plot_heatmap(ax, data, epochs, lr_list, bs_list, title, cmap, vmin=None, vma
                     text = f"{data[i, j]:.4f}\nepoch={int(epochs[i, j])}"
                 else:
                     text = f"{data[i, j]:+.4f}"
-                ax.text(j, i, text, ha='center', va='center', fontsize=13.5, color=text_color, fontweight='normal')
+                font_weight = 'bold' if (bold_mask is not None and bold_mask[i, j]) else 'normal'
+                ax.text(j, i, text, ha='center', va='center', fontsize=13.5, color=text_color, fontweight=font_weight)
     return im
 
 def plot_3d_scatter_pair(ax, x, y, z, c, title):
@@ -254,10 +347,46 @@ def plot_3d_scatter_pair(ax, x, y, z, c, title):
 # Main script
 # ------------------------------------------------------------------------------
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Plot Swarm vs Central epoch analysis heatmaps. "
+            "By default, processes the built-in dataset mapping."
+        )
+    )
+    parser.add_argument(
+        "--swarm-subdir",
+        type=str,
+        default=None,
+        help="Optional swarm results subdirectory under new_results/",
+    )
+    parser.add_argument(
+        "--central-subdir",
+        type=str,
+        default=None,
+        help="Optional central results subdirectory under new_results/",
+    )
+    parser.add_argument(
+        "--dataset-name",
+        type=str,
+        default=None,
+        help="Optional output dataset label when using custom subdirs.",
+    )
+
+    args = parser.parse_args()
+
+    if (args.swarm_subdir is None) ^ (args.central_subdir is None):
+        parser.error("--swarm-subdir and --central-subdir must be provided together.")
+
+    return args
+
 def main():
+    args = parse_args()
+
     # --- Configuration -------------------------------------------------------
     HEATMAP = True
     LINEPLOTS = False
+    LINEPLOTS_GROUPED = False
     SCATTER = False
 
     # Base directories where results are stored
@@ -265,15 +394,35 @@ def main():
     CENTRAL_BASE = "new_results"
 
     # CSV filenames (adjust if needed)
-    SWARM_CSV = "swarm_results_entire_testset.csv"
-    CENTRAL_CSV = "central_results.csv"
+    SWARM_CSV = ["swarm_results_entire_testset.csv", "swarm_results.csv"]
+    CENTRAL_CSV = ["central_results.csv"]
 
     # Dataset subdirectories (must match the names used in your experiments)
     datasets = {
+        # Homogeneous datasets
         "mimiciii_total": "mimiciii_total_entire_testset_epochs",
         "mimiciv_total": "mimiciv_total_entire_testset_epochs",
         "mimiciv_fixed": "mimiciv_fixed_12500_entire_testset_epochs",
+        # Heterogeneous datasets
+        # Not including diagnosis in the first 48 hours
+        "eicu_data_20k_entire_testset": "eicu_data_20k_entire_testset",
+        "eicu_data_20k_separate_testset": "eicu_data_20k_separate_testset",
+        "eicu_data_20k_fixed_rows_entire_testset": "eicu_data_20k_fixed_rows_entire_testset",
+        "eicu_data_20k_fixed_rows_separate_testset": "eicu_data_20k_fixed_rows_separate_testset",
+        # Including diagnosis in the first 48 hours
+        "eicu_data_entire_testset": "eicu_data_entire_testset",
+        "eicu_data_separate_testset": "eicu_data_separate_testset",
+        "eicu_data_fixed_rows_entire_testset": "eicu_data_fixed_rows_entire_testset",
+        "eicu_data_fixed_rows_separate_testset": "eicu_data_fixed_rows_separate_testset"
     }
+
+    if args.swarm_subdir and args.central_subdir:
+        custom_name = args.dataset_name or f"swarm_{args.swarm_subdir}__central_{args.central_subdir}"
+        dataset_jobs = [(custom_name, args.swarm_subdir, args.central_subdir)]
+    else:
+        dataset_jobs = []
+        for name, subdir in datasets.items():
+            dataset_jobs.append((name, subdir, subdir))
 
     output_root = Path("plots_results/epochs_analysis")
     output_root.mkdir(parents=True, exist_ok=True)
@@ -283,15 +432,18 @@ def main():
     cmap_heat = LinearSegmentedColormap.from_list("custom_cmap", colors)
 
     # -------------------------------------------------------------------------
-    for dataset_name, subdir in datasets.items():
+    for dataset_name, swarm_subdir, central_subdir in dataset_jobs:
         print(f"\nProcessing {dataset_name}...")
+        if swarm_subdir != central_subdir:
+            print(f"  swarm from: {swarm_subdir}")
+            print(f"  central from: {central_subdir}")
         dataset_output_dir = output_root / dataset_name
         dataset_output_dir.mkdir(parents=True, exist_ok=True)
 
         # Load swarm results
-        swarm_results = load_results_for_config(SWARM_BASE, subdir, SWARM_CSV)
+        swarm_results = load_results_for_config(SWARM_BASE, swarm_subdir, SWARM_CSV)
         # Load central results
-        central_results = load_results_for_config(CENTRAL_BASE, subdir, CENTRAL_CSV)
+        central_results = load_results_for_config(CENTRAL_BASE, central_subdir, CENTRAL_CSV)
 
         if not swarm_results or not central_results:
             print(f"Missing results for {dataset_name}. Skipping.")
@@ -313,25 +465,49 @@ def main():
 
         # Compute difference matrix (Swarm - Central)
         diff = best_auc_swarm - best_auc_central
+        bold_swarm_best = compute_max_mask(best_auc_swarm)
+        bold_central_best = compute_max_mask(best_auc_central)
 
         # --- Heatmaps (3 subplots side by side) ------------------------------
         if HEATMAP:
             fig, axes = plt.subplots(1, 3, figsize=(30, 10))
 
             # Swarm heatmap
-            im1 = plot_heatmap(axes[0], best_auc_swarm, best_epoch_swarm, lr_list, bs_list, f"Swarm – {dataset_name}", cmap_heat, vmin, vmax)
+            im1 = plot_heatmap(
+                axes[0],
+                best_auc_swarm,
+                best_epoch_swarm,
+                lr_list,
+                bs_list,
+                f"Swarm – {dataset_name}",
+                cmap_heat,
+                vmin,
+                vmax,
+                bold_mask=bold_swarm_best,
+            )
             cbar1 = fig.colorbar(im1, ax=axes[0], orientation='vertical', shrink=0.8)
             cbar1.set_label('Best AUC')
 
             # Central heatmap
-            im2 = plot_heatmap(axes[1], best_auc_central, best_epoch_central, lr_list, bs_list, f"Central – {dataset_name}", cmap_heat, vmin, vmax)
+            im2 = plot_heatmap(
+                axes[1],
+                best_auc_central,
+                best_epoch_central,
+                lr_list,
+                bs_list,
+                f"Central – {dataset_name}",
+                cmap_heat,
+                vmin,
+                vmax,
+                bold_mask=bold_central_best,
+            )
             cbar2 = fig.colorbar(im2, ax=axes[1], orientation='vertical', shrink=0.8)
             cbar2.set_label('Best AUC')
 
-            # Difference heatmap (auto-scaled)
-            cmap_delta = mcolors.ListedColormap(["#8b0000", "#ff4500", "#ffff66", "#66ff66", "#006400"])
-            norm_delta = mcolors.BoundaryNorm([-1, -0.05, -0.01, 0.01, 0.05, 1], cmap_delta.N)
-            im3 = plot_heatmap(axes[2], diff, None, lr_list, bs_list, f"Swarm - Central\n{dataset_name}", cmap_delta, vmin = None, vmax = None, norm=norm_delta)
+            # Difference heatmap (continuous, smooth transitions around key deltas)
+            sym_diff = max(abs(np.nanmin(diff)), abs(np.nanmax(diff)))
+            cmap_delta, norm_delta = create_continuous_delta_cmap(-sym_diff, sym_diff)
+            im3 = plot_heatmap(axes[2], diff, None, lr_list, bs_list, f"Swarm - Central\n{dataset_name}", cmap_delta, vmin=None, vmax=None, norm=norm_delta)
             cbar3 = fig.colorbar(im3, ax=axes[2], orientation='vertical', shrink=0.8)
             cbar3.set_label('Δ AUC')
 
@@ -368,8 +544,7 @@ def main():
                 epoch_vmin = np.nanmin(np.concatenate([all_swarm_vals, all_central_vals]))
                 epoch_vmax = np.nanmax(np.concatenate([all_swarm_vals, all_central_vals]))
 
-                cmap_delta = mcolors.ListedColormap(["#8b0000", "#ff4500", "#ffff66", "#66ff66", "#006400"])
-                norm_delta = mcolors.BoundaryNorm([-1, -0.05, -0.01, 0.01, 0.05, 1], cmap_delta.N)
+                # continuous cmap for per-epoch diffs will be created per-epoch below
 
                 n_epochs = len(all_epochs)
                 fig, axes = plt.subplots(
@@ -381,6 +556,8 @@ def main():
                 for row_idx, epoch in enumerate(all_epochs):
                     auc_swarm_ep = swarm_epoch_matrices[epoch]
                     auc_central_ep = central_epoch_matrices[epoch]
+                    bold_swarm_epoch = compute_max_mask(auc_swarm_ep)
+                    bold_central_epoch = compute_max_mask(auc_central_ep)
                     diff_ep = np.where(
                         ~np.isnan(auc_swarm_ep) & ~np.isnan(auc_central_ep),
                         auc_swarm_ep - auc_central_ep,
@@ -389,19 +566,25 @@ def main():
 
                     im_s = plot_heatmap(
                         axes[row_idx, 0], auc_swarm_ep, None, lr_list, bs_list,
-                        f"Swarm – epoch {epoch}", cmap_heat, epoch_vmin, epoch_vmax
+                        f"Swarm – epoch {epoch}", cmap_heat, epoch_vmin, epoch_vmax, bold_mask=bold_swarm_epoch
                     )
                     fig.colorbar(im_s, ax=axes[row_idx, 0], orientation='vertical', shrink=0.8).set_label('AUC')
 
                     im_c = plot_heatmap(
                         axes[row_idx, 1], auc_central_ep, None, lr_list, bs_list,
-                        f"Central – epoch {epoch}", cmap_heat, epoch_vmin, epoch_vmax
+                        f"Central – epoch {epoch}", cmap_heat, epoch_vmin, epoch_vmax, bold_mask=bold_central_epoch
                     )
                     fig.colorbar(im_c, ax=axes[row_idx, 1], orientation='vertical', shrink=0.8).set_label('AUC')
 
+                    # Create a continuous delta colormap specific to this epoch's value range
+                    sym_ep = max(
+                        abs(np.nanmin(diff_ep)) if not np.all(np.isnan(diff_ep)) else 0,
+                        abs(np.nanmax(diff_ep)) if not np.all(np.isnan(diff_ep)) else 0,
+                    )
+                    cmap_delta_ep, norm_delta_ep = create_continuous_delta_cmap(-sym_ep, sym_ep)
                     im_d = plot_heatmap(
                         axes[row_idx, 2], diff_ep, None, lr_list, bs_list,
-                        f"Swarm - Central – epoch {epoch}", cmap_delta, None, None, norm=norm_delta
+                        f"Swarm - Central – epoch {epoch}", cmap_delta_ep, None, None, norm=norm_delta_ep
                     )
                     fig.colorbar(im_d, ax=axes[row_idx, 2], orientation='vertical', shrink=0.8).set_label('Δ AUC')
 
@@ -428,10 +611,32 @@ def main():
                     fig, ax = plt.subplots(figsize=(16, 8))
 
                     if len(epochs_swarm) > 0:
-                        ax.plot(epochs_swarm, auc_swarm, marker='o', linewidth=2, markersize=4, label='Swarm')
+                        swarm_line, = ax.plot(epochs_swarm, auc_swarm, marker='o', linewidth=2, markersize=4, label='Swarm')
+                        swarm_max_mask = np.isclose(auc_swarm, np.nanmax(auc_swarm), rtol=1e-10, atol=1e-12)
+                        ax.scatter(
+                            epochs_swarm[swarm_max_mask],
+                            auc_swarm[swarm_max_mask],
+                            s=130,
+                            color=swarm_line.get_color(),
+                            marker='o',
+                            edgecolors='black',
+                            linewidths=0.8,
+                            zorder=6,
+                        )
 
                     if len(epochs_central) > 0:
-                        ax.plot(epochs_central, auc_central, marker='s', linewidth=2, markersize=4, label='Central')
+                        central_line, = ax.plot(epochs_central, auc_central, marker='s', linewidth=2, markersize=4, label='Central')
+                        central_max_mask = np.isclose(auc_central, np.nanmax(auc_central), rtol=1e-10, atol=1e-12)
+                        ax.scatter(
+                            epochs_central[central_max_mask],
+                            auc_central[central_max_mask],
+                            s=130,
+                            color=central_line.get_color(),
+                            marker='s',
+                            edgecolors='black',
+                            linewidths=0.8,
+                            zorder=6,
+                        )
 
                     ax.set_xlim(0, 155)
                     ax.set_xticks(np.arange(0, 155, 5))
@@ -448,6 +653,150 @@ def main():
                     plt.savefig(line_file, dpi=300, bbox_inches='tight')
                     plt.close()
                     print(f"Saved line graph: {line_file}")
+
+        if LINEPLOTS_GROUPED:
+            # --- Line plots fixing LR: compare all BS (Swarm vs Central) --------
+            line_plots_fix_lr_dir = dataset_output_dir / "line_plots_fix_lr"
+            line_plots_fix_lr_dir.mkdir(parents=True, exist_ok=True)
+
+            bs_colors = plt.cm.tab20(np.linspace(0, 1, max(len(bs_list), 1)))
+
+            for lr in lr_list:
+                fig, ax = plt.subplots(figsize=(18, 9))
+                plotted_any = False
+
+                for idx, bs in enumerate(bs_list):
+                    color = bs_colors[idx % len(bs_colors)]
+                    epochs_swarm, auc_swarm = get_mean_curve(swarm_results, lr, bs)
+                    epochs_central, auc_central = get_mean_curve(central_results, lr, bs)
+
+                    if len(epochs_swarm) > 0:
+                        ax.plot(
+                            epochs_swarm,
+                            auc_swarm,
+                            color=color,
+                            linestyle='-',
+                            linewidth=2.0,
+                            marker='o',
+                            markersize=3,
+                            label=f"bs={bs} | Swarm",
+                        )
+                        swarm_max_mask = np.isclose(auc_swarm, np.nanmax(auc_swarm), rtol=1e-10, atol=1e-12)
+                        ax.scatter(
+                            epochs_swarm[swarm_max_mask],
+                            auc_swarm[swarm_max_mask],
+                            s=130,
+                            color=color,
+                            marker='o',
+                            edgecolors='black',
+                            linewidths=0.8,
+                            zorder=6,
+                        )
+                        plotted_any = True
+
+                    # if len(epochs_central) > 0:
+                    #     ax.plot(
+                    #         epochs_central,
+                    #         auc_central,
+                    #         color=color,
+                    #         linestyle='--',
+                    #         linewidth=2.0,
+                    #         marker='s',
+                    #         markersize=3,
+                    #         label=f"bs={bs} | Central",
+                    #     )
+                    #     plotted_any = True
+
+                if not plotted_any:
+                    plt.close(fig)
+                    continue
+
+                ax.set_xlim(0, 155)
+                ax.set_xticks(np.arange(0, 155, 5))
+                ax.set_ylim(0.4, 0.9)
+                ax.set_xlabel('Epoch', fontsize=12)
+                ax.set_ylabel('AUC', fontsize=12)
+                ax.set_title(f"{dataset_name} | fixed lr={lr:.5f} | colors=bs, style=Swarm/Central", fontsize=12)
+                ax.grid(True, alpha=0.3)
+                ax.legend(loc='center left', bbox_to_anchor=(1.01, 0.5), fontsize=9)
+
+                lr_label = f"{lr:.5f}".replace('.', '-')
+                line_fix_lr_file = line_plots_fix_lr_dir / f"line_fix_lr{lr_label}_all_bs.png"
+                plt.tight_layout()
+                plt.savefig(line_fix_lr_file, dpi=300, bbox_inches='tight')
+                plt.close()
+                print(f"Saved fixed-lr line graph: {line_fix_lr_file}")
+
+            # --- Line plots fixing BS: compare all LR (Swarm vs Central) --------
+            line_plots_fix_bs_dir = dataset_output_dir / "line_plots_fix_bs"
+            line_plots_fix_bs_dir.mkdir(parents=True, exist_ok=True)
+
+            lr_colors = plt.cm.tab20(np.linspace(0, 1, max(len(lr_list), 1)))
+
+            for bs in bs_list:
+                fig, ax = plt.subplots(figsize=(18, 9))
+                plotted_any = False
+
+                for idx, lr in enumerate(lr_list):
+                    color = lr_colors[idx % len(lr_colors)]
+                    epochs_swarm, auc_swarm = get_mean_curve(swarm_results, lr, bs)
+                    epochs_central, auc_central = get_mean_curve(central_results, lr, bs)
+
+                    if len(epochs_swarm) > 0:
+                        ax.plot(
+                            epochs_swarm,
+                            auc_swarm,
+                            color=color,
+                            linestyle='-',
+                            linewidth=2.0,
+                            marker='o',
+                            markersize=3,
+                            label=f"lr={lr:.5f} | Swarm",
+                        )
+                        swarm_max_mask = np.isclose(auc_swarm, np.nanmax(auc_swarm), rtol=1e-10, atol=1e-12)
+                        ax.scatter(
+                            epochs_swarm[swarm_max_mask],
+                            auc_swarm[swarm_max_mask],
+                            s=130,
+                            color=color,
+                            marker='o',
+                            edgecolors='black',
+                            linewidths=0.8,
+                            zorder=6,
+                        )
+                        plotted_any = True
+
+                    # if len(epochs_central) > 0:
+                    #     ax.plot(
+                    #         epochs_central,
+                    #         auc_central,
+                    #         color=color,
+                    #         linestyle='--',
+                    #         linewidth=2.0,
+                    #         marker='s',
+                    #         markersize=3,
+                    #         label=f"lr={lr:.5f} | Central",
+                    #     )
+                    #     plotted_any = True
+
+                if not plotted_any:
+                    plt.close(fig)
+                    continue
+
+                ax.set_xlim(0, 155)
+                ax.set_xticks(np.arange(0, 155, 5))
+                ax.set_ylim(0.4, 0.9)
+                ax.set_xlabel('Epoch', fontsize=12)
+                ax.set_ylabel('AUC', fontsize=12)
+                ax.set_title(f"{dataset_name} | fixed bs={bs} | colors=lr, style=Swarm/Central", fontsize=12)
+                ax.grid(True, alpha=0.3)
+                ax.legend(loc='center left', bbox_to_anchor=(1.01, 0.5), fontsize=9)
+
+                line_fix_bs_file = line_plots_fix_bs_dir / f"line_fix_bs{bs}_all_lr.png"
+                plt.tight_layout()
+                plt.savefig(line_fix_bs_file, dpi=300, bbox_inches='tight')
+                plt.close()
+                print(f"Saved fixed-bs line graph: {line_fix_bs_file}")
 
         # --- 3D Scatter plots (2 subplots side by side) ----------------------
         if SCATTER:

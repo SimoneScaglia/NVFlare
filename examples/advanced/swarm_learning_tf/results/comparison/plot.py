@@ -59,6 +59,7 @@ central_mean_auc = central_data['auc'].mean()
 plt.hlines(central_mean_auc, min(swarm_splits), max(swarm_splits), 
         colors=colors['central'], linestyles='dashed', 
         label=f'Centralized')
+plt.ylim(0.8, 0.9)
 
 # Aggiunta legenda e visualizzazione grafico
 plt.legend()

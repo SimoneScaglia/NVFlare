@@ -6,7 +6,7 @@ cd "${SCRIPT_DIR}"
 
 PYTHON_BIN="../swarm_learning_tf/swarm_env/bin/python"
 MODE="${1:-all}"   # all | swarm | central
-CONFIG_DIR="${CONFIG_DIR:-configs_all_datasets_epochs}"
+CONFIG_DIR="${CONFIG_DIR:-configs_eicu}"
 
 if [[ "${MODE}" != "all" && "${MODE}" != "swarm" && "${MODE}" != "central" ]]; then
   echo "Usage: $0 [all|swarm|central]"
@@ -40,6 +40,10 @@ for config in "${CONFIG_FILES[@]}"; do
     echo "  -> central"
     "${PYTHON_BIN}" run-central.py -c "${config}"
   fi
+
+  rm -f "${config}"
+  echo "  -> deleted config: ${config}"
+
 done
 
 echo

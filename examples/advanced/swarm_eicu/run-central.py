@@ -1,82 +1,50 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import gc
-from pathlib import Path
-from datetime import datetime
-from zoneinfo import ZoneInfo
 import argparse
+import gc
 import json
+import re
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras.metrics import AUC, BinaryAccuracy, Precision, Recall
 
-# seeds
+# Reproducibility
 np.random.seed(42)
 tf.keras.utils.set_random_seed(42)
 
 LABEL_COL_INDEX = -1
-NODES = None
-DATA_DIR = None
+ID_TRAIN_RE = re.compile(r"^(\d+)_train\.csv$")
 
-# parametri fissi
-EPOCHS = None
-BATCH_SIZE = None
-LEARNING_RATE = None
-
-# fixed output values
-OUTPUT_USER = "central"
-OUTPUT_SPLITS = 100
-OUTPUT_COLUMNS = ["datetime", "user", "splits", "loss", "auc", "auprc", "accuracy", "precision", "recall", "iteration", "epoch"]
-
-# ==========================
-# DEFINIZIONE MODELLO FCN
-# ==========================
-def build_fcn(input_dim: int) -> keras.Model:
-    """Costruisce una Fully Connected Network come in mimic_nets.py"""
-    kernel_initializer = tf.keras.initializers.GlorotUniform(seed=42)
-    bias_initializer = tf.keras.initializers.Zeros()
-
-    model = keras.Sequential([
-        keras.layers.Dense(16, activation="relu", input_shape=(input_dim,), kernel_initializer=kernel_initializer, bias_initializer=bias_initializer),
-        keras.layers.Dense(16, activation="relu", kernel_initializer=kernel_initializer, bias_initializer=bias_initializer),
-        keras.layers.Dense(16, activation="relu", kernel_initializer=kernel_initializer, bias_initializer=bias_initializer),
-        keras.layers.Dense(1, activation="sigmoid", kernel_initializer=kernel_initializer, bias_initializer=bias_initializer)
-    ])
-    return model
+OUTPUT_COLUMNS = [
+    "datetime",
+    "user",
+    "splits",
+    "loss",
+    "auc",
+    "auprc",
+    "accuracy",
+    "precision",
+    "recall",
+    "iteration",
+    "epoch",
+]
 
 
-def get_optimizer():
-    return tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE)
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run central baseline for eICU experiments.")
+    parser.add_argument("-c", "--config", type=str, required=True, help="Path to experiment JSON config")
+    return parser.parse_args()
 
 
-def get_metrics():
-    return [
-        AUC(name='auc', curve='ROC', num_thresholds=1000),
-        AUC(name='auprc', curve='PR', num_thresholds=1000),
-        BinaryAccuracy(name='accuracy'),
-        Precision(name='precision'),
-        Recall(name='recall')
-    ]
-
-
-# ==========================
-# FUNZIONI DI UTILITÀ
-# ==========================
-def prepare_xy(df: pd.DataFrame, feature_columns=None):
-    if feature_columns is None:
-        X_cols = [c for c in df.columns if c != df.columns[LABEL_COL_INDEX]]
-    else:
-        X_cols = feature_columns
-    missing = [c for c in X_cols if c not in df.columns]
-    for c in missing:
-        df[c] = 0.0
-    X = df[X_cols].astype(np.float32).to_numpy()
-    y = df[df.columns[LABEL_COL_INDEX]].astype(np.float32).to_numpy().reshape(-1, 1)
-    return X, y, X_cols
+def current_datetime_rome_iso():
+    return datetime.now(ZoneInfo("Europe/Rome")).isoformat()
 
 
 def ensure_dir(path: Path):
@@ -84,66 +52,117 @@ def ensure_dir(path: Path):
 
 
 def append_result_csv(path: Path, row: dict):
-    full = {col: row.get(col, None) for col in OUTPUT_COLUMNS}
-    df_row = pd.DataFrame([full], columns=OUTPUT_COLUMNS)
+    ordered = {col: row.get(col, None) for col in OUTPUT_COLUMNS}
+    row_df = pd.DataFrame([ordered], columns=OUTPUT_COLUMNS)
     if path.exists():
-        df_row.to_csv(path, mode='a', header=False, index=False)
+        row_df.to_csv(path, mode="a", header=False, index=False)
     else:
-        df_row.to_csv(path, mode='w', header=True, index=False)
+        row_df.to_csv(path, mode="w", header=True, index=False)
 
 
-def current_datetime_rome_iso():
-    return datetime.now(ZoneInfo("Europe/Rome")).isoformat()
+def build_fcn(input_dim: int) -> keras.Model:
+    kernel_initializer = tf.keras.initializers.GlorotUniform(seed=42)
+    bias_initializer = tf.keras.initializers.Zeros()
+
+    model = keras.Sequential(
+        [
+            keras.layers.Dense(
+                16,
+                activation="relu",
+                input_shape=(input_dim,),
+                kernel_initializer=kernel_initializer,
+                bias_initializer=bias_initializer,
+            ),
+            keras.layers.Dense(16, activation="relu", kernel_initializer=kernel_initializer, bias_initializer=bias_initializer),
+            keras.layers.Dense(16, activation="relu", kernel_initializer=kernel_initializer, bias_initializer=bias_initializer),
+            keras.layers.Dense(1, activation="sigmoid", kernel_initializer=kernel_initializer, bias_initializer=bias_initializer),
+        ]
+    )
+    return model
 
 
-# ==========================
-# TRAIN + EVAL
-# ==========================
-HOSPITAL_IDS = [1, 2, 3, 4, 5]  # Hospital IDs cablati
+def get_optimizer(learning_rate: float):
+    return tf.keras.optimizers.Adam(learning_rate=learning_rate)
 
-# Modifica della funzione per caricare e concatenare i dati
 
-def load_and_concat_datasets(data_dir: Path, iteration: int, dataset_type: str) -> pd.DataFrame:
-    """
-    Carica e concatena i file di train o test dei singoli nodi, mescolandoli in base all'iterazione.
+def get_metrics():
+    return [
+        AUC(name="auc", curve="ROC", num_thresholds=1000),
+        AUC(name="auprc", curve="PR", num_thresholds=1000),
+        BinaryAccuracy(name="accuracy"),
+        Precision(name="precision"),
+        Recall(name="recall"),
+    ]
 
-    Args:
-        data_dir (Path): Directory dei dati.
-        iteration (int): Iterazione corrente per mescolare i dati.
-        dataset_type (str): Tipo di dataset ('train' o 'test').
 
-    Returns:
-        pd.DataFrame: DataFrame concatenato e mescolato.
-    """
-    dfs = []
-    for hospital_id in HOSPITAL_IDS:
-        file_path = data_dir / f"{hospital_id}_{dataset_type}.csv"
-        if not file_path.exists():
-            raise FileNotFoundError(f"File mancante: {file_path}")
-        df = pd.read_csv(file_path)
-        dfs.append(df)
+def prepare_xy(df: pd.DataFrame, feature_columns=None):
+    if feature_columns is None:
+        x_cols = [c for c in df.columns if c != df.columns[LABEL_COL_INDEX]]
+    else:
+        x_cols = feature_columns
 
-    concatenated_df = pd.concat(dfs, axis=0, ignore_index=True)
-    return concatenated_df.sample(frac=1, random_state=iteration).reset_index(drop=True)
+    missing = [c for c in x_cols if c not in df.columns]
+    for c in missing:
+        df[c] = 0.0
 
-def train_and_eval(x_nodes: int, iteration_y: int, epochs: int, batch_size: int, out_file: Path, eval_every: int = 5, verbose=0):
-    print(f"\n=== x_nodes={x_nodes}, iteration={iteration_y} ===")
+    x = df[x_cols].astype(np.float32).to_numpy()
+    y = df[df.columns[LABEL_COL_INDEX]].astype(np.float32).to_numpy().reshape(-1, 1)
+    return x, y, x_cols
 
-    # Caricamento e concatenazione dei dataset
-    df_train = load_and_concat_datasets(DATA_DIR, iteration_y, "train")
-    df_test = load_and_concat_datasets(DATA_DIR, iteration_y, "test")
 
-    X_train, y_train, feature_cols = prepare_xy(df_train)
-    X_test, y_test, _ = prepare_xy(df_test, feature_columns=feature_cols)
+def discover_dataset_ids(data_dir: Path):
+    ids = []
+    for file_path in sorted(data_dir.glob("*_train.csv")):
+        match = ID_TRAIN_RE.match(file_path.name)
+        if not match:
+            continue
+        dataset_id = int(match.group(1))
+        test_path = data_dir / f"{dataset_id}_test.csv"
+        if test_path.exists():
+            ids.append(dataset_id)
 
-    input_dim = X_train.shape[1]
-    print(f"Train samples: {X_train.shape[0]}, Test samples: {X_test.shape[0]}, input_dim={input_dim}")
+    if not ids:
+        raise ValueError(f"No <id>_train.csv and <id>_test.csv pairs found in {data_dir}")
+
+    return ids
+
+
+def load_split_df(data_dir: Path, dataset_id: int, split: str):
+    path = data_dir / f"{dataset_id}_{split}.csv"
+    if not path.exists():
+        raise FileNotFoundError(f"Missing dataset file: {path}")
+    return pd.read_csv(path)
+
+
+def load_concat_split_df(data_dir: Path, dataset_ids, split: str, shuffle_seed: int):
+    frames = [load_split_df(data_dir, dataset_id, split) for dataset_id in dataset_ids]
+    df = pd.concat(frames, axis=0, ignore_index=True)
+    return df.sample(frac=1, random_state=shuffle_seed).reset_index(drop=True)
+
+
+def evaluate_checkpoints(
+    df_train: pd.DataFrame,
+    df_test: pd.DataFrame,
+    learning_rate: float,
+    batch_size: int,
+    epochs: int,
+    out_file: Path,
+    user,
+    splits: float,
+    iteration: int,
+    eval_every: int = 5,
+    verbose=0,
+):
+    x_train, y_train, feature_cols = prepare_xy(df_train)
+    x_test, y_test, _ = prepare_xy(df_test, feature_columns=feature_cols)
+
+    input_dim = x_train.shape[1]
 
     model = build_fcn(input_dim)
     model.compile(
-        optimizer=get_optimizer(),
+        optimizer=get_optimizer(learning_rate),
         loss=tf.keras.losses.BinaryCrossentropy(),
-        metrics=get_metrics()
+        metrics=get_metrics(),
     )
 
     checkpoints = list(range(eval_every, epochs + 1, eval_every))
@@ -151,10 +170,9 @@ def train_and_eval(x_nodes: int, iteration_y: int, epochs: int, batch_size: int,
         checkpoints.append(epochs)
 
     prev_epoch = 0
-    eval_results = None
     for target_epoch in checkpoints:
         model.fit(
-            X_train,
+            x_train,
             y_train,
             initial_epoch=prev_epoch,
             epochs=target_epoch,
@@ -163,18 +181,19 @@ def train_and_eval(x_nodes: int, iteration_y: int, epochs: int, batch_size: int,
             shuffle=True,
         )
 
-        eval_results = model.evaluate(X_test, y_test, batch_size=batch_size, verbose=0, return_dict=True)
+        metrics = model.evaluate(x_test, y_test, batch_size=batch_size, verbose=0, return_dict=True)
+
         row = {
             "datetime": current_datetime_rome_iso(),
-            "user": OUTPUT_USER,
-            "splits": OUTPUT_SPLITS,
-            "loss": eval_results["loss"],
-            "auc": eval_results["auc"],
-            "auprc": eval_results["auprc"],
-            "accuracy": eval_results["accuracy"],
-            "precision": eval_results["precision"],
-            "recall": eval_results["recall"],
-            "iteration": iteration_y,
+            "user": user,
+            "splits": splits,
+            "loss": metrics["loss"],
+            "auc": metrics["auc"],
+            "auprc": metrics["auprc"],
+            "accuracy": metrics["accuracy"],
+            "precision": metrics["precision"],
+            "recall": metrics["recall"],
+            "iteration": iteration,
             "epoch": target_epoch,
         }
         append_result_csv(out_file, row)
@@ -184,43 +203,81 @@ def train_and_eval(x_nodes: int, iteration_y: int, epochs: int, batch_size: int,
     del model
     gc.collect()
 
-    return eval_results
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Run global learner with configurable parameters.")
-    parser.add_argument("-c", "--config", type=str, required=True, help="Path to the configuration JSON file.")
-    return parser.parse_args()
+def run_central(config: dict, data_dir: Path, dataset_ids, out_file: Path, epochs: int, batch_size: int, learning_rate: float):
+    iteration = int(config.get("iteration", 0))
 
-# ==========================
-# MAIN LOOP
-# ==========================
+    df_train = load_concat_split_df(data_dir, dataset_ids, "train", shuffle_seed=iteration)
+    df_test = load_concat_split_df(data_dir, dataset_ids, "test", shuffle_seed=iteration)
+
+    evaluate_checkpoints(
+        df_train=df_train,
+        df_test=df_test,
+        learning_rate=learning_rate,
+        batch_size=batch_size,
+        epochs=epochs,
+        out_file=out_file,
+        user="central",
+        splits=100,
+        iteration=iteration,
+        eval_every=5,
+    )
+
+
 def main():
     args = parse_args()
 
-    # Load configuration from JSON file
-    with open(args.config, "r") as f:
+    with open(args.config, "r", encoding="utf-8") as f:
         config = json.load(f)
 
-    global NODES, DATA_DIR, TEST_FILE, EPOCHS, BATCH_SIZE, LEARNING_RATE
-    NODES = config["num_nodes"]
-    DATA_DIR = Path(config["data_directory"])
-    EPOCHS = int(config.get("num_aggregation_rounds", 5) * config.get("aggregation_per_epoch", 5))
-    BATCH_SIZE = config["hyperparameters"]["batch_size"]
-    LEARNING_RATE = config["hyperparameters"]["learning_rate"]
+    script_dir = Path(__file__).resolve().parent
 
-    out_dir = Path(config["results_directory"])
-    ensure_dir(out_dir)
-    out_file = out_dir / "central_results.csv"
+    data_dir = Path(config["data_directory"])
+    if not data_dir.is_absolute():
+        data_dir = (script_dir / data_dir).resolve()
 
-    _ = train_and_eval(
-        x_nodes=config["num_nodes"],
-        iteration_y=config["iteration"],
-        epochs=EPOCHS,
-        batch_size=BATCH_SIZE,
+    if not data_dir.exists():
+        raise FileNotFoundError(f"Data directory does not exist: {data_dir}")
+
+    dataset_ids = config.get("dataset_ids") or discover_dataset_ids(data_dir)
+    dataset_ids = [int(x) for x in dataset_ids]
+    if not dataset_ids:
+        raise ValueError("dataset_ids cannot be empty")
+
+    num_nodes = int(config.get("num_nodes", len(dataset_ids)))
+    if num_nodes != len(dataset_ids):
+        raise ValueError(f"num_nodes ({num_nodes}) does not match dataset_ids count ({len(dataset_ids)})")
+
+    epochs = int(config.get("num_aggregation_rounds", 1) * config.get("aggregation_per_epoch", 1))
+    if epochs <= 0:
+        raise ValueError("Computed epochs must be > 0")
+
+    batch_size = int(config["hyperparameters"]["batch_size"])
+    learning_rate = float(config["hyperparameters"]["learning_rate"])
+
+    results_dir = Path(config["results_directory"])
+    if not results_dir.is_absolute():
+        results_dir = (script_dir / results_dir).resolve()
+    ensure_dir(results_dir)
+    out_file = results_dir / "central_results.csv"
+
+    eval_mode = str(config.get("evaluation_mode", "entire")).strip().lower()
+
+    print(f"Running central baseline for config: {args.config}")
+    print(f"  mode={eval_mode}, ids={dataset_ids}, epochs={epochs}, bs={batch_size}, lr={learning_rate}")
+    print(f"  output={out_file}")
+
+    run_central(
+        config=config,
+        data_dir=data_dir,
+        dataset_ids=dataset_ids,
         out_file=out_file,
-        eval_every=5,
+        epochs=epochs,
+        batch_size=batch_size,
+        learning_rate=learning_rate,
     )
-    print(f"Salvati risultati ogni 5 epoche in {out_file}")
+
+    print(f"Central results saved to {out_file}")
 
 
 if __name__ == "__main__":
