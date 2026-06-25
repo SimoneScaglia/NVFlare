@@ -31,6 +31,7 @@ SWARM_OUTPUT_COLUMNS = [
     "recall",
     "iteration",
     "epoch",
+    "fedprox_mu",
 ]
 
 
@@ -61,6 +62,7 @@ def edit_config_files(
     min_responses_required,
     learning_rate,
     batch_size,
+    fedproxloss_mu,
     aggregation_epochs,
     num_rounds,
 ):
@@ -74,6 +76,12 @@ def edit_config_files(
         client_content = re.sub(
             r"min_responses_required\s*=\s*\d+",
             f"min_responses_required = {min_responses_required}",
+            client_content,
+        )
+
+        client_content = re.sub(
+            r"fedproxloss_mu\s*=\s*[-+\deE.]+",
+            f"fedproxloss_mu = {fedproxloss_mu:g}",
             client_content,
         )
 
@@ -301,6 +309,7 @@ def evaluate_round_checkpoints_live(
                         "recall": metrics["recall"],
                         "iteration": iteration,
                         "epoch": epoch_marker,
+                        "fedprox_mu": float(config.get("fedproxloss_mu", 0.0)),
                     }
                     append_swarm_result(results_file, row)
 
@@ -400,6 +409,7 @@ def evaluate_round_checkpoints_live(
                     "recall": metrics["recall"],
                     "iteration": iteration,
                     "epoch": epoch_marker,
+                    "fedprox_mu": float(config.get("fedproxloss_mu", 0.0)),
                 }
                 append_swarm_result(results_file, row)
 
@@ -483,6 +493,7 @@ def main():
     min_responses_for_aggregation = int(config.get("min_responses_for_aggregation", 0))
     learning_rate = float(config.get("hyperparameters", {}).get("learning_rate", 0.0))
     batch_size = int(config.get("hyperparameters", {}).get("batch_size", 0))
+    fedproxloss_mu = float(config.get("fedproxloss_mu", 0.0))
     aggregation_per_epoch = int(config.get("aggregation_per_epoch", 1))
     num_aggregation_rounds = int(config.get("num_aggregation_rounds", 1))
 
@@ -492,6 +503,7 @@ def main():
         min_responses_required=min_responses_for_aggregation,
         learning_rate=learning_rate,
         batch_size=batch_size,
+        fedproxloss_mu=fedproxloss_mu,
         aggregation_epochs=aggregation_per_epoch,
         num_rounds=num_aggregation_rounds,
     )

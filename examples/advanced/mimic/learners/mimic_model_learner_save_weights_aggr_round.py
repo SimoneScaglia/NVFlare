@@ -90,7 +90,7 @@ class MimicModelLearner(ModelLearner):
 
         if self.fedproxloss_mu > 0:
             self.info(f"using FedProx loss with mu {self.fedproxloss_mu}")
-            self.criterion_prox = TFFedProxLoss(mu=self.fedproxloss_mu)
+            self.criterion_prox = None
 
     def _create_datasets(self):
         """Load the tabular datasets, split for training and validation."""
@@ -136,7 +136,11 @@ class MimicModelLearner(ModelLearner):
                     out = self.model(x, training=True)
                     base_loss = self.criterion(y, out)
                     if self.fedproxloss_mu > 0:
-                        prox = self.criterion_prox(self.model.trainable_variables, list(global_weights.values()))
+                        global_weights_list = list(global_weights.values())
+                        global_tensors = [tf.convert_to_tensor(g, dtype=v.dtype) for v, g in zip(self.model.trainable_variables, global_weights_list)]
+                        diffs = [v - g for v, g in zip(self.model.trainable_variables, global_tensors)]
+                        squared = [tf.reduce_sum(tf.square(d)) for d in diffs]
+                        prox = (self.fedproxloss_mu / 2.0) * tf.add_n(squared)
                         loss = base_loss + prox
                     else:
                         loss = base_loss

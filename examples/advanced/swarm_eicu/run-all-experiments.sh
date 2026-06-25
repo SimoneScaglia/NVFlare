@@ -13,8 +13,8 @@ if [[ "${MODE}" != "all" && "${MODE}" != "swarm" && "${MODE}" != "central" ]]; t
   exit 1
 fi
 
-echo "Generating configs in ${CONFIG_DIR} ..."
-"${PYTHON_BIN}" generate_configs_eicu.py --base-dir "${CONFIG_DIR}" --iterations 5
+echo "Generating configs in ${CONFIG_DIR} with FedProx ..."
+# "${PYTHON_BIN}" generate_configs_eicu.py --base-dir "${CONFIG_DIR}" --iterations 5
 
 mapfile -t CONFIG_FILES < <(find "${CONFIG_DIR}" -maxdepth 1 -type f -name "*.json" | sort)
 
