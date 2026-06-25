@@ -52,7 +52,7 @@ def build_uniform_node_weights(num_nodes: int):
     return {str(i): share for i in range(1, num_nodes + 1)}
 
 
-def create_config_files(base_dir, learning_rates, batch_sizes, total_epochs, aggregation_per_epoch=5, iterations=5, fedprox_mu=0.0):
+def create_config_files(base_dir, total_epochs, aggregation_per_epoch=5, iterations=5):
     if total_epochs <= 0:
         raise ValueError("total_epochs must be > 0")
     if aggregation_per_epoch <= 0:
@@ -80,9 +80,16 @@ def create_config_files(base_dir, learning_rates, batch_sizes, total_epochs, agg
         "iteration": 0,
     }
 
-    # The 4 eICU datasets requested by the user.
-    dataset_variants = ["data_fixed_rows"]
-    eval_modes = ["separate", "entire"]
+    eicu_variants_hyperparamers = {
+        "data_20k_entire":              [0.0005, 32],
+        "data_20k_fixed_rows_entire":   [0.0001,  8],
+        "data_20k_fixed_rows_separate": [0.0001,  8],
+        "data_20k_separate":            [0.0005, 32],
+        "data_entire":                  [0.0001,  8],
+        "data_fixed_rows_entire":       [0.0001,  8],
+        "data_fixed_rows_separate":     [0.0001,  8],
+        "data_separate":                [0.0001,  8],
+    }
 
     base_dir_path = Path(base_dir)
     base_dir_path.mkdir(parents=True, exist_ok=True)
@@ -94,15 +101,12 @@ def create_config_files(base_dir, learning_rates, batch_sizes, total_epochs, agg
     swarm_eicu_dir = Path(__file__).resolve().parent
     num_rounds = total_epochs // aggregation_per_epoch
     # We'll generate configs for multiple fedprox mu values (if desired).
-    fedprox_values = [1e-1, 1e-4, 1e-7]
-    # If user provided a specific fedprox_mu via CLI and it's not the default,
-    # prefer that single value only.
-    if fedprox_mu is not None and fedprox_mu not in (1e-5, 0.0):
-        fedprox_values = [fedprox_mu]
+    fedprox_values = [10, 1, 0, 1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7]
 
     created = 0
-    for dataset_variant in dataset_variants:
-        data_dir = swarm_eicu_dir / "datasets" / "eicu" / dataset_variant
+    for eicu_variant in eicu_variants_hyperparamers.keys():
+        data_dir = swarm_eicu_dir / "datasets" / "eicu" / eicu_variant
+        lr, bs = eicu_variants_hyperparamers[eicu_variant]
         if not data_dir.exists():
             raise FileNotFoundError(f"Dataset directory not found: {data_dir}")
 
@@ -110,44 +114,41 @@ def create_config_files(base_dir, learning_rates, batch_sizes, total_epochs, agg
         num_nodes = len(dataset_ids)
         node_weights = build_uniform_node_weights(num_nodes)
 
-        for eval_mode in eval_modes:
-            results_subdir = f"eicu_{dataset_variant}_{eval_mode}_testset"
-            min_responses = num_nodes
+        results_subdir = f"eicu_{eicu_variant}_testset"
+        min_responses = num_nodes
 
-            for lr in learning_rates:
-                for bs in batch_sizes:
-                    for iteration in range(iterations):
-                        for fedprox in fedprox_values:
-                            config = copy.deepcopy(base_config)
-                            config["fedproxloss_mu"] = fedprox
-                            # Keep results directory identical across fedprox variants
-                            config["experiment_name"] = (
-                                f"eicu_{dataset_variant}_{eval_mode}_{total_epochs}_{iteration}_lr{lr:.5f}_bs{bs}"
-                            )
-                            config["num_nodes"] = num_nodes
-                            config["node_weights"] = node_weights
-                            config["min_responses_for_aggregation"] = min_responses
-                            config["num_aggregation_rounds"] = num_rounds
-                            config["aggregation_per_epoch"] = aggregation_per_epoch
-                            config["hyperparameters"]["learning_rate"] = lr
-                            config["hyperparameters"]["batch_size"] = bs
-                            config["data_directory"] = f"datasets/eicu/{dataset_variant}/"
-                            config["dataset_ids"] = dataset_ids
-                            config["evaluation_mode"] = eval_mode
-                            config["results_directory"] = (
-                                f"fedprox_new_results/{results_subdir}/{total_epochs}_{iteration}_lr{lr:.5f}_bs{bs}/"
-                            )
-                            config["iteration"] = iteration
-                            # Use fedprox value in the file name so configs are unique
-                            fedprox_str = f"{fedprox:.0e}".replace("-0", "")
-                            file_name = (
-                                f"eicu_{dataset_variant}_{eval_mode}_{total_epochs}_{iteration}_lr{lr:.5f}_bs{bs}_fedprox{fedprox_str}.json"
-                            ).replace("0.", "0-")
-                            file_path = base_dir_path / file_name
+        for iteration in range(iterations):
+            for fedprox in fedprox_values:
+                config = copy.deepcopy(base_config)
+                config["fedproxloss_mu"] = fedprox
+                # Keep results directory identical across fedprox variants
+                config["experiment_name"] = (
+                    f"eicu_{eicu_variant}_{total_epochs}_{iteration}_lr{lr:.5f}_bs{bs}"
+                )
+                config["num_nodes"] = num_nodes
+                config["node_weights"] = node_weights
+                config["min_responses_for_aggregation"] = min_responses
+                config["num_aggregation_rounds"] = num_rounds
+                config["aggregation_per_epoch"] = aggregation_per_epoch
+                config["hyperparameters"]["learning_rate"] = lr
+                config["hyperparameters"]["batch_size"] = bs
+                config["data_directory"] = f"datasets/eicu/{eicu_variant}/"
+                config["dataset_ids"] = dataset_ids
+                config["evaluation_mode"] = "entire" if "entire" in eicu_variant else "separate"
+                config["results_directory"] = (
+                    f"fedprox_new_results/hp_fixed/{results_subdir}/{total_epochs}_lr{lr:.5f}_bs{bs}/"
+                )
+                config["iteration"] = iteration
+                # Use fedprox value in the file name so configs are unique
+                fedprox_str = f"{fedprox:.0e}".replace("-0", "")
+                file_name = (
+                    f"eicu_{eicu_variant}_{total_epochs}_{iteration}_lr{lr:.5f}_bs{bs}_fedprox{fedprox_str}.json"
+                ).replace("0.", "0-")
+                file_path = base_dir_path / file_name
 
-                            with open(file_path, "w", encoding="utf-8") as f:
-                                json.dump(config, f, indent=4)
-                            created += 1
+                with open(file_path, "w", encoding="utf-8") as f:
+                    json.dump(config, f, indent=4)
+                created += 1
 
     print(f"Generated {created} config files in: {base_dir_path}")
 
@@ -155,15 +156,9 @@ def create_config_files(base_dir, learning_rates, batch_sizes, total_epochs, agg
 if __name__ == "__main__":
     args = parse_args()
 
-    learning_rates = [0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1]
-    batch_sizes = [8, 16, 32, 64, 128, 256, 512]
-
     create_config_files(
         base_dir=args.base_dir,
-        learning_rates=learning_rates,
-        batch_sizes=batch_sizes,
         total_epochs=args.total_epochs,
         aggregation_per_epoch=args.aggregation_per_epoch,
         iterations=args.iterations,
-        fedprox_mu=args.fedprox_mu,
     )
