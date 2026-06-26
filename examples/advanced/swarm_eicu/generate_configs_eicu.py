@@ -105,7 +105,7 @@ def create_config_files(base_dir, total_epochs, aggregation_per_epoch=5, iterati
 
     created = 0
     for eicu_variant in eicu_variants_hyperparamers.keys():
-        data_dir = swarm_eicu_dir / "datasets" / "eicu" / eicu_variant
+        data_dir = swarm_eicu_dir / "datasets" / "eicu" / eicu_variant.removesuffix("_entire").removesuffix("_separate")
         lr, bs = eicu_variants_hyperparamers[eicu_variant]
         if not data_dir.exists():
             raise FileNotFoundError(f"Dataset directory not found: {data_dir}")
@@ -132,7 +132,7 @@ def create_config_files(base_dir, total_epochs, aggregation_per_epoch=5, iterati
                 config["aggregation_per_epoch"] = aggregation_per_epoch
                 config["hyperparameters"]["learning_rate"] = lr
                 config["hyperparameters"]["batch_size"] = bs
-                config["data_directory"] = f"datasets/eicu/{eicu_variant}/"
+                config["data_directory"] = f"datasets/eicu/{eicu_variant.removesuffix('_entire').removesuffix('_separate')}/"
                 config["dataset_ids"] = dataset_ids
                 config["evaluation_mode"] = "entire" if "entire" in eicu_variant else "separate"
                 config["results_directory"] = (
@@ -142,8 +142,8 @@ def create_config_files(base_dir, total_epochs, aggregation_per_epoch=5, iterati
                 # Use fedprox value in the file name so configs are unique
                 fedprox_str = f"{fedprox:.0e}".replace("-0", "")
                 file_name = (
-                    f"eicu_{eicu_variant}_{total_epochs}_{iteration}_lr{lr:.5f}_bs{bs}_fedprox{fedprox_str}.json"
-                ).replace("0.", "0-")
+                    f"eicu_{eicu_variant}_{total_epochs}_{iteration}_lr{lr:.5f}_bs{bs}_fedprox{fedprox_str}"
+                ).replace("0.", "0-") + ".json"
                 file_path = base_dir_path / file_name
 
                 with open(file_path, "w", encoding="utf-8") as f:
