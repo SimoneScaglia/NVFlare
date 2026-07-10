@@ -21,6 +21,12 @@ def parse_args():
         help="Local epochs per aggregation round",
     )
     parser.add_argument("--fedprox-mu", type=float, default=1e-5, help="FedProx proximal term strength (default used when generating single-mu sets)")
+    parser.add_argument(
+        "--evaluation-mode",
+        choices=["all", "entire", "separate"],
+        default="all",
+        help="Generate configs for all modes or only one evaluation mode",
+    )
     return parser.parse_args()
 
 
@@ -52,7 +58,7 @@ def build_uniform_node_weights(num_nodes: int):
     return {str(i): share for i in range(1, num_nodes + 1)}
 
 
-def create_config_files(base_dir, total_epochs, aggregation_per_epoch=5, iterations=5):
+def create_config_files(base_dir, total_epochs, aggregation_per_epoch=5, iterations=5, evaluation_mode="all"):
     if total_epochs <= 0:
         raise ValueError("total_epochs must be > 0")
     if aggregation_per_epoch <= 0:
@@ -105,6 +111,10 @@ def create_config_files(base_dir, total_epochs, aggregation_per_epoch=5, iterati
 
     created = 0
     for eicu_variant in eicu_variants_hyperparamers.keys():
+        variant_mode = "entire" if "_entire" in eicu_variant else "separate"
+        if evaluation_mode != "all" and variant_mode != evaluation_mode:
+            continue
+
         data_dir = swarm_eicu_dir / "datasets" / "eicu" / eicu_variant.removesuffix("_entire").removesuffix("_separate")
         lr, bs = eicu_variants_hyperparamers[eicu_variant]
         if not data_dir.exists():
@@ -134,9 +144,9 @@ def create_config_files(base_dir, total_epochs, aggregation_per_epoch=5, iterati
                 config["hyperparameters"]["batch_size"] = bs
                 config["data_directory"] = f"datasets/eicu/{eicu_variant.removesuffix('_entire').removesuffix('_separate')}/"
                 config["dataset_ids"] = dataset_ids
-                config["evaluation_mode"] = "entire" if "entire" in eicu_variant else "separate"
+                config["evaluation_mode"] = variant_mode
                 config["results_directory"] = (
-                    f"fedprox_new_results/hp_fixed/{results_subdir}/{total_epochs}_lr{lr:.5f}_bs{bs}/"
+                    f"fedprox_new_results/hp_fixed_no_best_model/{results_subdir}/{total_epochs}_lr{lr:.5f}_bs{bs}/"
                 )
                 config["iteration"] = iteration
                 # Use fedprox value in the file name so configs are unique
@@ -161,4 +171,5 @@ if __name__ == "__main__":
         total_epochs=args.total_epochs,
         aggregation_per_epoch=args.aggregation_per_epoch,
         iterations=args.iterations,
+        evaluation_mode=args.evaluation_mode,
     )

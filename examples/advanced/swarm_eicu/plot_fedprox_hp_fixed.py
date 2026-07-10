@@ -28,6 +28,10 @@ eicu_variants_hyperparamers = {
 # Flag per includere il modello centrale
 PLOT_CENTRAL = True   # cambia in False se vuoi solo i risultati swarm
 
+# Se True, plotta solo i top 3 mu FedProx (per AUC media su tutte le epoche)
+# + FedAvg (mu=0) se presente nei risultati.
+TOP3 = True
+
 MU_VALUES_TO_PLOT = None
 
 MU_MATCH_ATOL = 1e-12
@@ -158,6 +162,66 @@ def load_central_results(base_dir, dataset_name, csv_filenames):
 
     return auc_results, loss_results
 
+
+def load_fedavg_results(base_dir, dataset_name, csv_filenames, target_lr, target_bs):
+    """
+    Carica i risultati FedAvg (swarm) da new_results/<dataset_name>/... per una
+    specifica configurazione (lr, bs).
+
+    Restituisce:
+        fedavg_auc[epoch] = media sulle iterazioni
+        fedavg_loss[epoch] = media sulle iterazioni (se presente)
+    """
+    base_path = Path(base_dir) / dataset_name
+    if not base_path.exists():
+        return {}, {}
+
+    auc_by_epoch = {}
+    loss_by_epoch = {}
+
+    for dir_path in base_path.iterdir():
+        if not dir_path.is_dir():
+            continue
+
+        dir_name = dir_path.name
+        try:
+            _ = parse_iteration_from_dir(dir_name)
+            lr = parse_lr_from_dir(dir_name)
+            bs = parse_bs_from_dir(dir_name)
+        except Exception:
+            continue
+
+        if not (np.isclose(lr, target_lr, atol=1e-12, rtol=1e-9) and bs == target_bs):
+            continue
+
+        csv_path = get_existing_csv_path(dir_path, csv_filenames)
+        if csv_path is None:
+            continue
+
+        try:
+            df = pd.read_csv(csv_path)
+            if 'epoch' not in df.columns:
+                continue
+
+            for epoch_value, df_epoch in df.groupby('epoch'):
+                epoch_int = int(epoch_value)
+                if is_separate_testset_epoch(df_epoch):
+                    iter_aucs = compute_separate_testset_iteration_metrics(df_epoch, 'auc')
+                    iter_losses = compute_separate_testset_iteration_metrics(df_epoch, 'loss') if 'loss' in df_epoch.columns else []
+                else:
+                    iter_aucs = [compute_iteration_metric(df_epoch, 'auc')]
+                    iter_losses = [compute_iteration_metric(df_epoch, 'loss')] if 'loss' in df_epoch.columns else []
+
+                auc_by_epoch.setdefault(epoch_int, []).extend(iter_aucs)
+                if iter_losses:
+                    loss_by_epoch.setdefault(epoch_int, []).extend(iter_losses)
+        except Exception as e:
+            print(f"Errore nel processare FedAvg {csv_path}: {e}")
+
+    fedavg_auc = {ep: float(np.mean(vals)) for ep, vals in auc_by_epoch.items() if vals}
+    fedavg_loss = {ep: float(np.mean(vals)) for ep, vals in loss_by_epoch.items() if vals}
+    return fedavg_auc, fedavg_loss
+
 # ==================================================
 # CICLO PRINCIPALE
 # ==================================================
@@ -219,12 +283,52 @@ for key, (lr, bs) in eicu_variants_hyperparamers.items():
             central_loss = {ep: np.mean(vals) for ep, vals in loss_res[lr][bs].items()}
         # Se non ci sono loss, semplicemente non plottiamo la loss centrale
 
+    # --- 2b. Carica risultati FedAvg dedicati (solo quando TOP3=True) ---
+    fedavg_auc = {}
+    fedavg_loss = {}
+    if TOP3:
+        fedavg_csv_candidates = ["swarm_results_entire_testset.csv", "swarm_results.csv"]
+        fedavg_auc, fedavg_loss = load_fedavg_results(
+            BASE_CENTRAL_DIR,
+            f"eicu_{key}_testset",
+            fedavg_csv_candidates,
+            lr,
+            bs,
+        )
+        if not fedavg_auc:
+            print(f"  Nessun FedAvg dedicato trovato in {BASE_CENTRAL_DIR}/eicu_{key}_testset per lr={lr}, bs={bs}")
+
     # --- 3. Creazione del plot ---
     # Lista dei valori unici di mu, ordinati dal più piccolo al più grande
     mu_values = sorted(swarm_agg['fedprox_mu'].unique())
 
+    # Se TOP3 è attivo, seleziona automaticamente i 3 migliori mu FedProx
+    # (escludendo FedAvg con mu=0), usando la media AUC su tutte le epoche/iterazioni.
+    if TOP3:
+        # Media AUC per mu calcolata sui dati originali (tutte le epoche/iterazioni).
+        mu_auc_mean = df_swarm.groupby('fedprox_mu', as_index=False)['auc'].mean()
+
+        # Escludi FedAvg (mu=0) dai top3 FedProx.
+        mu_auc_mean = mu_auc_mean[
+            ~np.isclose(mu_auc_mean['fedprox_mu'], 0.0, atol=MU_MATCH_ATOL, rtol=MU_MATCH_RTOL)
+        ]
+
+        top3_mu = mu_auc_mean.sort_values('auc', ascending=False).head(3)['fedprox_mu'].tolist()
+
+        selected_mu = list(top3_mu)
+
+        if not selected_mu:
+            print("  TOP3 attivo ma nessun mu disponibile. Saltato.")
+            continue
+
+        # Ordina i mu selezionati per avere un asse/legenda coerente.
+        mu_values = sorted(set(selected_mu))
+        swarm_agg = swarm_agg[swarm_agg['fedprox_mu'].isin(mu_values)]
+
+        print(f"  TOP3 attivo: mu selezionati = {mu_values}")
+
     # Se richiesto, filtra i mu da plottare con match robusto rispetto ai valori del CSV
-    if MU_VALUES_TO_PLOT is not None:
+    if (MU_VALUES_TO_PLOT is not None) and (not TOP3):
         requested_mu = normalize_mu_values(MU_VALUES_TO_PLOT)
         matched_mu = [
             mu
@@ -249,7 +353,7 @@ for key, (lr, bs) in eicu_variants_hyperparamers.items():
 
     # Per avere colori distinti, prendiamo una mappa colori
     cmap = plt.get_cmap('tab10')
-    colors = [cmap(i % 10) for i in range(len(mu_values))]
+    colors = [cmap(i % 10) for i in range(len(mu_values) + 1)]
 
     fig, (ax_auc, ax_loss) = plt.subplots(2, 1, figsize=(20, 10), sharex=True)
 
@@ -259,6 +363,18 @@ for key, (lr, bs) in eicu_variants_hyperparamers.items():
         ax_auc.plot(sub['epoch'], sub['auc_mean'],
                     color=colors[idx], marker='o', linestyle='-',
                     label=f'μ={mu}')
+    if TOP3 and fedavg_auc:
+        ep_fedavg = sorted(fedavg_auc.keys())
+        auc_fedavg_vals = [fedavg_auc[ep] for ep in ep_fedavg]
+        ax_auc.plot(
+            ep_fedavg,
+            auc_fedavg_vals,
+            color=colors[len(mu_values)],
+            linestyle='-.',
+            linewidth=2,
+            marker='^',
+            label='FedAvg',
+        )
     if central_auc:
         # Aggiungi linea centrale
         ep_central = sorted(central_auc.keys())
@@ -267,7 +383,7 @@ for key, (lr, bs) in eicu_variants_hyperparamers.items():
                     color='black', linestyle='--', linewidth=2,
                     marker='s', label='Central')
     ax_auc.set_ylabel('AUC')
-    ax_auc.set_ylim(0.5, 0.9)
+    ax_auc.set_ylim(0.55, 0.85)
     ax_auc.set_title(f'Dataset: eicu_{key}  (lr={lr}, bs={bs})', fontsize=12)
     ax_auc.legend(title='FedProx μ', bbox_to_anchor=(1.05, 1), loc='upper left')
     ax_auc.grid(True, alpha=0.3)
@@ -278,6 +394,18 @@ for key, (lr, bs) in eicu_variants_hyperparamers.items():
         ax_loss.plot(sub['epoch'], sub['loss_mean'],
                     color=colors[idx], marker='o', linestyle='-',
                     label=f'μ={mu}')
+    if TOP3 and fedavg_loss:
+        ep_fedavg = sorted(fedavg_loss.keys())
+        loss_fedavg_vals = [fedavg_loss[ep] for ep in ep_fedavg]
+        ax_loss.plot(
+            ep_fedavg,
+            loss_fedavg_vals,
+            color=colors[len(mu_values)],
+            linestyle='-.',
+            linewidth=2,
+            marker='^',
+            label='FedAvg',
+        )
     if central_loss:
         ep_central = sorted(central_loss.keys())
         loss_central_vals = [central_loss[ep] for ep in ep_central]
@@ -286,7 +414,7 @@ for key, (lr, bs) in eicu_variants_hyperparamers.items():
                     marker='s', label='Central')
     ax_loss.set_xlabel('Epoch')
     ax_loss.set_ylabel('Loss')
-    ax_loss.set_ylim(0.3, 0.7)
+    ax_loss.set_ylim(0.15, 0.6)
     ax_loss.legend(title='FedProx μ', bbox_to_anchor=(1.05, 1), loc='upper left')
     ax_loss.grid(True, alpha=0.3)
 

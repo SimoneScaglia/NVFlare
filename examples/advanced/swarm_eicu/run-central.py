@@ -204,24 +204,121 @@ def evaluate_checkpoints(
     gc.collect()
 
 
+def evaluate_checkpoints_separate(
+    df_train: pd.DataFrame,
+    test_frames_by_user: dict,
+    learning_rate: float,
+    batch_size: int,
+    epochs: int,
+    out_file: Path,
+    splits_by_user: dict,
+    iteration: int,
+    eval_every: int = 5,
+    verbose=0,
+):
+    x_train, y_train, feature_cols = prepare_xy(df_train)
+    prepared_tests = {}
+    for user, df_test in test_frames_by_user.items():
+        x_test, y_test, _ = prepare_xy(df_test, feature_columns=feature_cols)
+        prepared_tests[user] = (x_test, y_test)
+
+    input_dim = x_train.shape[1]
+
+    model = build_fcn(input_dim)
+    model.compile(
+        optimizer=get_optimizer(learning_rate),
+        loss=tf.keras.losses.BinaryCrossentropy(),
+        metrics=get_metrics(),
+    )
+
+    checkpoints = list(range(eval_every, epochs + 1, eval_every))
+    if not checkpoints or checkpoints[-1] != epochs:
+        checkpoints.append(epochs)
+
+    prev_epoch = 0
+    for target_epoch in checkpoints:
+        model.fit(
+            x_train,
+            y_train,
+            initial_epoch=prev_epoch,
+            epochs=target_epoch,
+            batch_size=batch_size,
+            verbose=verbose,
+            shuffle=True,
+        )
+
+        for user, (x_test, y_test) in prepared_tests.items():
+            metrics = model.evaluate(x_test, y_test, batch_size=batch_size, verbose=0, return_dict=True)
+            row = {
+                "datetime": current_datetime_rome_iso(),
+                "user": user,
+                "splits": float(splits_by_user.get(user, np.nan)),
+                "loss": metrics["loss"],
+                "auc": metrics["auc"],
+                "auprc": metrics["auprc"],
+                "accuracy": metrics["accuracy"],
+                "precision": metrics["precision"],
+                "recall": metrics["recall"],
+                "iteration": iteration,
+                "epoch": target_epoch,
+            }
+            append_result_csv(out_file, row)
+
+        prev_epoch = target_epoch
+
+    tf.keras.backend.clear_session()
+    del model
+    gc.collect()
+
+
 def run_central(config: dict, data_dir: Path, dataset_ids, out_file: Path, epochs: int, batch_size: int, learning_rate: float):
     iteration = int(config.get("iteration", 0))
+    eval_mode = str(config.get("evaluation_mode", "entire")).strip().lower()
+    num_nodes = len(dataset_ids)
 
     df_train = load_concat_split_df(data_dir, dataset_ids, "train", shuffle_seed=iteration)
-    df_test = load_concat_split_df(data_dir, dataset_ids, "test", shuffle_seed=iteration)
 
-    evaluate_checkpoints(
-        df_train=df_train,
-        df_test=df_test,
-        learning_rate=learning_rate,
-        batch_size=batch_size,
-        epochs=epochs,
-        out_file=out_file,
-        user="central",
-        splits=100,
-        iteration=iteration,
-        eval_every=5,
-    )
+    if eval_mode == "separate":
+        default_split = 100.0 / float(num_nodes)
+        node_weights = config.get("node_weights", {})
+        test_frames_by_user = {}
+        splits_by_user = {}
+
+        for idx, dataset_id in enumerate(dataset_ids, start=1):
+            test_frames_by_user[dataset_id] = load_split_df(data_dir, dataset_id, "test")
+            splits_by_user[dataset_id] = float(node_weights.get(str(idx), default_split))
+
+        evaluate_checkpoints_separate(
+            df_train=df_train,
+            test_frames_by_user=test_frames_by_user,
+            learning_rate=learning_rate,
+            batch_size=batch_size,
+            epochs=epochs,
+            out_file=out_file,
+            splits_by_user=splits_by_user,
+            iteration=iteration,
+            eval_every=5,
+        )
+        return
+
+    if eval_mode == "entire":
+        df_test = load_concat_split_df(data_dir, dataset_ids, "test", shuffle_seed=iteration)
+
+        evaluate_checkpoints(
+            df_train=df_train,
+            df_test=df_test,
+            learning_rate=learning_rate,
+            batch_size=batch_size,
+            epochs=epochs,
+            out_file=out_file,
+            user="central",
+            splits=100,
+            iteration=iteration,
+            eval_every=5,
+        )
+        return
+
+    raise ValueError(f"Unsupported evaluation_mode: {eval_mode}. Expected 'separate' or 'entire'.")
 
 
 def main():

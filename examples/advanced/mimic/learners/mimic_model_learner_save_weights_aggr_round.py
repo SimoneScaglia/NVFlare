@@ -7,7 +7,6 @@ from nvflare.apis.fl_constant import FLMetaKey, ReturnCode
 from nvflare.app_common.abstract.fl_model import FLModel, ParamsType
 from nvflare.app_common.abstract.model_learner import ModelLearner
 from nvflare.app_common.utils.fl_model_utils import FLModelUtils
-from nvflare.app_opt.tf.fedprox_loss import TFFedProxLoss
 from mimic.networks.mimic_nets import FCN, get_metrics
 from sklearn.model_selection import train_test_split
 from nvflare.app_common.app_constant import AppConstants, ModelName
@@ -70,7 +69,6 @@ class MimicModelLearner(ModelLearner):
         self.model = None
         self.optimizer = None
         self.criterion = None
-        self.criterion_prox = None
         self.train_dataset = None
         self.valid_dataset = None
         self.train_loader = None
@@ -89,8 +87,10 @@ class MimicModelLearner(ModelLearner):
         self.criterion = tf.keras.losses.BinaryCrossentropy()
 
         if self.fedproxloss_mu > 0:
+            # TFFedProxLoss in current NVFlare requires model weights and base loss
+            # at construction time, so we compute the proximal term inline during
+            # training where current local/global weights are available.
             self.info(f"using FedProx loss with mu {self.fedproxloss_mu}")
-            self.criterion_prox = None
 
     def _create_datasets(self):
         """Load the tabular datasets, split for training and validation."""
@@ -136,11 +136,12 @@ class MimicModelLearner(ModelLearner):
                     out = self.model(x, training=True)
                     base_loss = self.criterion(y, out)
                     if self.fedproxloss_mu > 0:
-                        global_weights_list = list(global_weights.values())
-                        global_tensors = [tf.convert_to_tensor(g, dtype=v.dtype) for v, g in zip(self.model.trainable_variables, global_weights_list)]
-                        diffs = [v - g for v, g in zip(self.model.trainable_variables, global_tensors)]
-                        squared = [tf.reduce_sum(tf.square(d)) for d in diffs]
-                        prox = (self.fedproxloss_mu / 2.0) * tf.add_n(squared)
+                        prox = (self.fedproxloss_mu / 2.0) * tf.add_n(
+                            [
+                                tf.reduce_sum(tf.square(local_w - tf.cast(global_w, local_w.dtype)))
+                                for local_w, global_w in zip(self.model.trainable_variables, global_weights)
+                            ]
+                        )
                         loss = base_loss + prox
                     else:
                         loss = base_loss
@@ -174,7 +175,9 @@ class MimicModelLearner(ModelLearner):
         self.model.set_weights(list(global_weights.values()) if isinstance(global_weights, dict) else global_weights)
 
         # Local train steps
-        self.local_train(self.train_loader, global_weights, val_freq=1 if self.central else 0)
+        global_weight_list = list(global_weights.values()) if isinstance(global_weights, dict) else global_weights
+
+        self.local_train(self.train_loader, global_weight_list, val_freq=1 if self.central else 0)
 
         # ===== Validate after local train with all metrics =====
         metrics_list = get_metrics()

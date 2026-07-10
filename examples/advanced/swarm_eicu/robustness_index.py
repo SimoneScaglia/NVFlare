@@ -418,3 +418,29 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# robustness_index = k * performance_score + (1 - k) * stability_score
+# 
+# dove
+# 
+# performance_score = radice_quadrata(performance_swarm * performance_central)
+# 
+# performance_swarm = (auc_proximity_swarm + loss_proximity_swarm) / 2
+# performance_central = (auc_proximity_central + loss_proximity_central) / 2
+# 
+# auc_proximity_swarm = auc_swarm / massimo_auc_swarm
+# auc_proximity_central = auc_central / massimo_auc_central
+# loss_proximity_swarm = 1 - ((loss_swarm - minimo_loss_swarm) / (massimo_loss_swarm - minimo_loss_swarm))
+# loss_proximity_central = 1 - ((loss_central - minimo_loss_central) / (massimo_loss_central - minimo_loss_central))
+# 
+# e
+# 
+# stability_score = radice_quadrata(stability_swarm * stability_central)
+# 
+# stability_swarm = ((1 - normalizza(volatility_auc_swarm)) + (1 - normalizza(volatility_loss_swarm))) / 2
+# stability_central = ((1 - normalizza(volatility_auc_central)) + (1 - normalizza(volatility_loss_central))) / 2
+# 
+# normalizza(valore) = (valore - valore_minimo) / (valore_massimo - valore_minimo)
+# 
+# volatility_auc = media(valore_assoluto(auc_epoca_i - auc_epoca_i_meno_1))
+# volatility_loss = media(valore_assoluto(loss_epoca_i - loss_epoca_i_meno_1))
